@@ -8,3 +8,10 @@ updates:
       - dependencies
       - docker
     open-pull-requests-limit: 5
+    ignore:
+      # The application and CI matrix currently support Python 3.11 through 3.13.
+      # Keep accepting same-family digest/security refreshes without jumping runtimes.
+      - dependency-name: python
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
