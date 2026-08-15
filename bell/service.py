@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -23,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from bell.audio import transcode
 from bell.config import BellConfig, BellEvent, ConfigLoadError, load_config
@@ -32,8 +33,22 @@ from bell.logging_setup import configure_logging
 from bell.monitor import EndpointMonitor, EndpointRegistry
 from bell.paging import PageCoordinator
 from bell.scheduler import BellScheduler
+from bell.systemd import notify, watchdog_interval
 
 LOGGER = logging.getLogger(__name__)
+
+
+def load_environment_file(path: Path) -> None:
+    for number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, separator, value = line.partition("=")
+        if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]{1,127}", name):
+            raise ValueError(f"{path}:{number}: invalid environment assignment")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ.setdefault(name, value)
 
 
 def clock_sync_status() -> tuple[bool | None, str]:
@@ -356,6 +371,33 @@ class ServiceRuntime:
             }
             return JSONResponse(payload, status_code=200 if health["ready"] else 503)
 
+        @app.get("/metrics", response_class=PlainTextResponse)
+        def metrics() -> str:
+            health = self.health_data()
+            lines = [
+                "# HELP bell_ready Whether all readiness requirements pass.",
+                "# TYPE bell_ready gauge",
+                f"bell_ready {1 if health['ready'] else 0}",
+                "# HELP bell_uptime_seconds Process uptime in seconds.",
+                "# TYPE bell_uptime_seconds gauge",
+                f"bell_uptime_seconds {float(health['uptime_seconds']):.3f}",
+                "# HELP bell_endpoint_healthy Endpoint health by destination and protocol.",
+                "# TYPE bell_endpoint_healthy gauge",
+            ]
+            for endpoint in health["endpoints"]:
+                name = (
+                    str(endpoint["name"])
+                    .replace("\\", "\\\\")
+                    .replace("\n", "\\n")
+                    .replace('"', '\\"')
+                )
+                protocol = str(endpoint["protocol"]).replace('"', '\\"')
+                healthy = 1 if endpoint["state"] == "healthy" else 0
+                lines.append(
+                    f'bell_endpoint_healthy{{destination="{name}",protocol="{protocol}"}} {healthy}'
+                )
+            return "\n".join(lines) + "\n"
+
         return app
 
 
@@ -363,8 +405,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-dir", type=Path, default=Path("config"))
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--env-file", type=Path)
     parser.add_argument("--health-port", type=int, default=8000)
     args = parser.parse_args(argv)
+    if args.env_file:
+        try:
+            load_environment_file(args.env_file)
+        except (OSError, ValueError) as exc:
+            print(f"Cannot load environment file: {exc}", file=sys.stderr)
+            return 1
     try:
         config = load_config(args.config_dir)
     except ConfigLoadError as exc:
@@ -422,6 +471,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     office_thread = threading.Thread(target=office_server.run, name="office-server", daemon=True)
     office_thread.start()
 
+    startup_deadline = time.monotonic() + 15
+    while time.monotonic() < startup_deadline and not (server.started and office_server.started):
+        time.sleep(0.05)
+    if not (server.started and office_server.started):
+        LOGGER.error("server_startup_failed")
+        runtime.scheduler.shutdown(wait=False)
+        runtime.monitor.stop()
+        server.should_exit = True
+        office_server.should_exit = True
+        return 1
+
     stopping = threading.Event()
 
     def stop(_signum: int, _frame: object) -> None:
@@ -430,16 +490,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     LOGGER.info("bell_service_started")
-    while not stopping.wait(1.0):
-        pass
+    notify("READY=1\nSTATUS=School bell scheduler and operator console started")
+    heartbeat_seconds = watchdog_interval()
+    last_heartbeat = 0.0
+    component_failed = False
+    while not stopping.wait(min(1.0, heartbeat_seconds)):
+        if not (
+            runtime.scheduler.scheduler.running
+            and runtime.monitor.is_alive
+            and server_thread.is_alive()
+            and office_thread.is_alive()
+        ):
+            LOGGER.critical("service_component_stopped")
+            notify("STATUS=Bell service component stopped")
+            component_failed = True
+            stopping.set()
+            break
+        if time.monotonic() - last_heartbeat >= heartbeat_seconds:
+            notify("WATCHDOG=1")
+            last_heartbeat = time.monotonic()
     LOGGER.info("bell_service_stopping")
+    notify("STOPPING=1\nSTATUS=School bell service stopping")
     runtime.scheduler.shutdown(wait=True)
     runtime.monitor.stop()
     server.should_exit = True
     office_server.should_exit = True
     server_thread.join(timeout=10)
     office_thread.join(timeout=10)
-    return 0
+    return 1 if component_failed else 0
 
 
 if __name__ == "__main__":

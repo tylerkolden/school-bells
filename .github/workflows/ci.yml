@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+      - name: Install project
+        run: python -m pip install --upgrade pip 'setuptools>=83' && python -m pip install -e '.[dev]'
+      - name: Static analysis
+        run: ruff check .
+      - name: Test with coverage gate
+        run: pytest --cov=bell --cov-report=term-missing --cov-fail-under=75
+      - name: Audit dependencies
+        run: pip-audit
+      - name: Build distributions
+        run: python -m build

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 from bell.config import Destination, load_config
 from bell.monitor import EndpointMonitor, EndpointRegistry
 from bell.protocols.base import DeliveryOutcome
@@ -44,3 +47,33 @@ def test_probe_exception_becomes_health_outcome(config_tree, monkeypatch) -> Non
     assert not outcome.success
     assert outcome.status == "probe_error"
     assert "simulated probe crash" in outcome.detail
+
+
+def test_endpoint_probes_run_concurrently(config_tree, monkeypatch) -> None:
+    config = load_config(config_tree)
+    config.destinations = [
+        Destination(
+            name=name,
+            protocol="http",
+            port=443,
+            webhook_url=f"https://{name}.example.test/hook",
+        )
+        for name in ("one", "two")
+    ]
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def check(_client, destination):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return DeliveryOutcome(destination.name, "http", True, "200", "ok", 1, 0.05)
+
+    monkeypatch.setattr("bell.monitor.WebhookClient.check", check)
+    outcomes = EndpointMonitor(config, EndpointRegistry()).check_once()
+    assert len(outcomes) == 2 and peak == 2

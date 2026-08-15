@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -7,7 +8,7 @@ from fastapi.testclient import TestClient
 from bell.config import load_config
 from bell.delivery import DeliveryReport
 from bell.protocols.base import DeliveryOutcome
-from bell.service import ServiceRuntime, interface_present, validate_startup
+from bell.service import ServiceRuntime, interface_present, load_environment_file, validate_startup
 
 
 def test_loopback_interface_and_startup_validation(config_tree: Path, monkeypatch) -> None:
@@ -35,6 +36,10 @@ def test_health_and_readiness_shape(config_tree: Path, monkeypatch) -> None:
     assert "endpoint monitor not running" in health["readiness_reasons"]
     assert health["config_valid"] is True
     assert {"last_fire", "next_scheduled_fire", "config_hash", "kill_switch", "uptime_seconds", "clock"} <= health.keys()
+    metrics = client.get("/metrics")
+    assert metrics.status_code == 200
+    assert "bell_ready 0" in metrics.text
+    assert "bell_uptime_seconds" in metrics.text
 
 
 def test_pre_tone_and_repeats_use_one_coordinated_page(config_tree: Path) -> None:
@@ -82,3 +87,12 @@ def test_page_duration_limit_is_enforced_before_delivery(config_tree: Path) -> N
         assert "max_page_seconds" in str(exc)
     else:
         raise AssertionError("overlong page was not rejected")
+
+
+def test_environment_file_is_parsed_without_shell_evaluation(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "bell.env"
+    path.write_text("# comment\nBELL_SAFE_VALUE='literal $(touch nope)'\n", encoding="utf-8")
+    monkeypatch.delenv("BELL_SAFE_VALUE", raising=False)
+    load_environment_file(path)
+    assert os.environ["BELL_SAFE_VALUE"] == "literal $(touch nope)"
+    assert not (tmp_path / "nope").exists()

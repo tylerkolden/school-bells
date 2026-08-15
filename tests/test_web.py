@@ -37,6 +37,7 @@ def test_auth_is_required(config_tree: Path) -> None:
     response = client.get("/", follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
+    assert len(response.headers["x-request-id"]) == 16
 
 
 def test_no_bell_round_trip_preserves_yaml(config_tree: Path) -> None:

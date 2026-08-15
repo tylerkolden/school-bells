@@ -83,3 +83,15 @@ sudo systemctl start bell-system
 Automation keys are credentials. Rotate normal and emergency keys independently, keep the emergency
 key only in approved panic-button/integration systems, and never put either key in a URL or browser
 bookmark. Reusing an `Idempotency-Key` intentionally returns the original result without ringing again.
+
+## Monitoring and upgrades
+
+Scrape `http://127.0.0.1:8000/metrics` through a local monitoring agent. Alert when `bell_ready` is
+zero, a required `bell_endpoint_healthy` value is zero, the service restarts, or no fresh JSON log
+records arrive. The HTTP endpoint is intentionally loopback-only; do not expose it directly.
+
+Run `sudo bash deploy/install.sh` from a reviewed checkout to upgrade. Each upgrade archives the
+installed configuration and state under `/var/backups/bell-system` before copying or installing.
+Archives are root-only and retained for 90 days. The installer performs the same startup validation
+used by systemd before restarting, so a bad codec, interface, clock, secret reference, or sound file
+does not replace a running process with one that cannot start.
