@@ -112,3 +112,20 @@ def test_success_is_persisted_and_second_scheduler_cannot_refire(config_tree: Pa
     second = restarted.fire(planned, now=planned.scheduled_at)
     assert not second and "already attempted" in second.reason
     assert len(calls) == 1
+
+
+def test_reload_does_not_register_past_events(config_tree: Path, monkeypatch) -> None:
+    config = load_config(config_tree)
+    scheduler = BellScheduler(config, lambda *_args: None)
+    fixed_now = datetime(2027, 3, 15, 12, 0, tzinfo=ZoneInfo("America/Denver"))
+
+    class Noon(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr("bell.scheduler.datetime", Noon)
+    scheduler.register_day(fixed_now.date(), include_recent_misfires=False)
+    jobs = [job for job in scheduler.scheduler.get_jobs() if job.id.startswith("bell-")]
+    assert jobs
+    assert all(job.trigger.run_date > fixed_now for job in jobs)

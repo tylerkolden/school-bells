@@ -162,7 +162,9 @@ curl -X POST https://bell.example.edu:8080/api/v1/trigger \
 
 Use a trusted certificate via `BELL_TLS_CERTFILE` and `BELL_TLS_KEYFILE` whenever API/password traffic
 can cross anything beyond a physically trusted management LAN. Security headers, strict session
-cookies under TLS, no-store responses, scoped keys, and HMAC outbound signatures are built in.
+cookies under TLS, per-session CSRF protection, sign-in throttling, no-store responses, scoped keys,
+and HMAC outbound signatures are built in. Calendar saves use a configuration fingerprint to reject
+stale edits, retain rolling backups, and atomically replace the YAML only after validation.
 
 ## Phones and Algo
 

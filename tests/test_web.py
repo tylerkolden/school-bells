@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -11,8 +12,23 @@ from bell.scheduler import BellScheduler
 from bell.web import create_app
 
 
+def hidden(response, name: str) -> str:
+    match = re.search(rf'name="{name}" value="([^"]+)"', response.text)
+    assert match
+    return match.group(1)
+
+
+def csrf(client: TestClient, path: str = "/") -> str:
+    return hidden(client.get(path), "csrf")
+
+
 def login(client: TestClient) -> None:
-    response = client.post("/login", data={"submitted_password": "test"}, follow_redirects=False)
+    token = hidden(client.get("/login"), "csrf")
+    response = client.post(
+        "/login",
+        data={"submitted_password": "test", "csrf": token},
+        follow_redirects=False,
+    )
     assert response.status_code == 303
 
 
@@ -27,9 +43,17 @@ def test_no_bell_round_trip_preserves_yaml(config_tree: Path) -> None:
     client = TestClient(create_app(config_tree, password="test"))
     login(client)
     target = date(2027, 2, 2)
+    calendar = client.get(f"/calendar?selected={target.isoformat()}")
     response = client.post(
         "/calendar",
-        data={"selected": target.isoformat(), "schedule_name": "", "no_bell_reason": "Weather closure"},
+        data={
+            "selected": target.isoformat(),
+            "schedule_name": "",
+            "no_bell_reason": "Weather closure",
+            "calendar_action": "no_bells",
+            "config_hash": hidden(calendar, "config_hash"),
+            "csrf": hidden(calendar, "csrf"),
+        },
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -40,14 +64,17 @@ def test_no_bell_round_trip_preserves_yaml(config_tree: Path) -> None:
 def test_manual_requires_signed_confirmation(config_tree: Path) -> None:
     client = TestClient(create_app(config_tree, password="test"))
     login(client)
-    response = client.post("/manual/fire", data={"confirm_token": "invented"})
+    csrf_token = csrf(client, "/manual")
+    response = client.post(
+        "/manual/fire", data={"confirm_token": "invented", "csrf": csrf_token}
+    )
     assert response.status_code == 400
     prepared = client.post(
         "/manual/prepare",
-        data={"sound": "class-bell.wav", "zone": "indoors"},
+        data={"sound": "class-bell.wav", "zone": "indoors", "csrf": csrf_token},
     )
     assert prepared.status_code == 200
-    assert "Yes — ring now" in prepared.text
+    assert "Yes, play now" in prepared.text
 
 
 def test_out_of_hours_manual_is_blocked_without_override(config_tree: Path, monkeypatch) -> None:
@@ -59,12 +86,17 @@ def test_out_of_hours_manual_is_blocked_without_override(config_tree: Path, monk
     monkeypatch.setattr("bell.web.datetime", EarlyMorning)
     client = TestClient(create_app(config_tree, password="test"))
     login(client)
+    csrf_token = csrf(client, "/manual")
     prepared = client.post(
         "/manual/prepare",
-        data={"sound": "class-bell.wav", "zone": "indoors"},
+        data={"sound": "class-bell.wav", "zone": "indoors", "csrf": csrf_token},
     )
-    token = prepared.text.split('name="confirm_token" value="', 1)[1].split('"', 1)[0]
-    result = client.post("/manual/fire", data={"confirm_token": token}, follow_redirects=False)
+    token = hidden(prepared, "confirm_token")
+    result = client.post(
+        "/manual/fire",
+        data={"confirm_token": token, "csrf": hidden(prepared, "csrf")},
+        follow_redirects=False,
+    )
     assert result.status_code == 303
     assert "outside%20allowed%20bell%20hours" in result.headers["location"]
 
@@ -108,6 +140,12 @@ def test_automation_api_is_authenticated_emergency_scoped_and_idempotent(
     )
     assert replay.status_code == 200 and replay.json()["idempotent_replay"] is True
     assert calls == ["Automation API:everywhere"]
+    conflict = client.post(
+        "/api/v1/trigger",
+        json={**payload, "zone": "indoors"},
+        headers={"X-Bell-API-Key": "emergency-key", "Idempotency-Key": "drill-1"},
+    )
+    assert conflict.status_code == 409
 
 
 def test_automation_api_rejects_sound_path_escape(config_tree: Path, monkeypatch) -> None:
@@ -119,3 +157,51 @@ def test_automation_api_rejects_sound_path_escape(config_tree: Path, monkeypatch
         headers={"X-Bell-API-Key": "normal-key", "Idempotency-Key": "path-escape"},
     )
     assert response.status_code == 422
+
+
+def test_form_posts_require_csrf(config_tree: Path) -> None:
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+    response = client.post(
+        "/manual/prepare", data={"sound": "class-bell.wav", "zone": "indoors"}
+    )
+    assert response.status_code == 422
+    response = client.post(
+        "/manual/prepare",
+        data={"sound": "class-bell.wav", "zone": "indoors", "csrf": "wrong"},
+    )
+    assert response.status_code == 403
+
+
+def test_login_is_rate_limited(config_tree: Path) -> None:
+    client = TestClient(create_app(config_tree, password="test"))
+    token = hidden(client.get("/login"), "csrf")
+    for _ in range(5):
+        response = client.post(
+            "/login",
+            data={"submitted_password": "wrong", "csrf": token},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+    response = client.post("/login", data={"submitted_password": "test", "csrf": token})
+    assert response.status_code == 429
+
+
+def test_calendar_can_restore_default_and_rejects_stale_edit(config_tree: Path) -> None:
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+    target = date(2027, 1, 15)
+    page = client.get(f"/calendar?selected={target.isoformat()}")
+    form = {
+        "selected": target.isoformat(),
+        "schedule_name": "",
+        "no_bell_reason": "",
+        "calendar_action": "default",
+        "config_hash": hidden(page, "config_hash"),
+        "csrf": hidden(page, "csrf"),
+    }
+    response = client.post("/calendar", data=form, follow_redirects=False)
+    assert response.status_code == 303
+    assert target not in load_config(config_tree).calendar.no_bell_dates
+    response = client.post("/calendar", data=form, follow_redirects=False)
+    assert response.status_code == 409

@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 import shutil
+import tempfile
 import threading
 import time
 from collections import defaultdict, deque
@@ -101,6 +102,8 @@ def create_app(
     app.state.config_dir = directory
     app.state.scheduler = scheduler
     rate_limiter = RateLimiter(load_config(directory).settings.api_rate_limit_per_minute)
+    login_limiter = RateLimiter(5, 300.0)
+    calendar_lock = threading.Lock()
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -110,7 +113,7 @@ def create_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; img-src 'self' data:; style-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'"
+            "script-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         )
         if request.url.path.startswith("/api/") or request.session.get("authenticated"):
             response.headers["Cache-Control"] = "no-store"
@@ -121,8 +124,24 @@ def create_app(
     def config() -> BellConfig:
         return load_config(directory)
 
+    def csrf_token(request: Request) -> str:
+        token = request.session.get("csrf_token")
+        if not isinstance(token, str):
+            token = secrets.token_urlsafe(32)
+            request.session["csrf_token"] = token
+        return token
+
+    def verify_csrf(request: Request, supplied: str) -> None:
+        expected = request.session.get("csrf_token")
+        if not isinstance(expected, str) or not secrets.compare_digest(supplied, expected):
+            raise HTTPException(status_code=403, detail="Invalid or missing form security token")
+
     def render(request: Request, name: str, **context: Any) -> HTMLResponse:
-        return templates.TemplateResponse(request, name, {"authenticated": True, **context})
+        return templates.TemplateResponse(
+            request,
+            name,
+            {"authenticated": True, "csrf_token": csrf_token(request), **context},
+        )
 
     def require_auth(request: Request) -> None:
         if not request.session.get("authenticated"):
@@ -152,23 +171,67 @@ def create_app(
             status_code=400,
         )
 
+    @app.exception_handler(HTTPException)
+    async def http_error(request: Request, exc: HTTPException):
+        if exc.status_code == 303:
+            return RedirectResponse(exc.headers.get("Location", "/login"), status_code=303)
+        if request.url.path.startswith("/api/"):
+            return JSONResponse(
+                {"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers
+            )
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "authenticated": bool(request.session.get("authenticated")),
+                "csrf_token": csrf_token(request),
+                "message": str(exc.detail),
+            },
+            status_code=exc.status_code,
+            headers=exc.headers,
+        )
+
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request, failed: bool = False) -> HTMLResponse:
         return templates.TemplateResponse(
-            request, "login.html", {"authenticated": False, "failed": failed}
+            request,
+            "login.html",
+            {"authenticated": False, "failed": failed, "csrf_token": csrf_token(request)},
         )
 
     @app.post("/login")
-    def login(request: Request, submitted_password: str = Form()) -> RedirectResponse:
+    def login(
+        request: Request,
+        submitted_password: str = Form(),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf)
+        client_address = request.client.host if request.client else "unknown"
+        if not login_limiter.allow(client_address):
+            LOGGER.warning(
+                "ui_action",
+                extra={"action": "login", "result": "rate_limited", "client": client_address},
+            )
+            raise HTTPException(status_code=429, detail="Too many sign-in attempts. Try again later.")
         if not secrets.compare_digest(submitted_password, configured_password):
-            LOGGER.warning("ui_action", extra={"action": "login", "result": "denied"})
+            LOGGER.warning(
+                "ui_action",
+                extra={"action": "login", "result": "denied", "client": client_address},
+            )
             return RedirectResponse("/login?failed=true", status_code=303)
+        request.session.clear()
         request.session["authenticated"] = True
-        LOGGER.info("ui_action", extra={"action": "login", "result": "success"})
+        request.session["csrf_token"] = secrets.token_urlsafe(32)
+        LOGGER.info(
+            "ui_action",
+            extra={"action": "login", "result": "success", "client": client_address},
+        )
         return RedirectResponse("/", status_code=303)
 
     @app.post("/logout")
-    def logout(request: Request) -> RedirectResponse:
+    def logout(request: Request, csrf: str = Form()) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
         request.session.clear()
         return RedirectResponse("/login", status_code=303)
 
@@ -192,8 +255,11 @@ def create_app(
     def calendar_page(request: Request, selected: date | None = None) -> HTMLResponse:
         require_auth(request)
         cfg = config()
-        chosen = selected or date.today()
-        days = [resolve_day(date.today() + timedelta(days=offset), cfg) for offset in range(14)]
+        today_local = datetime.now(ZoneInfo(cfg.settings.timezone)).date()
+        chosen = selected or today_local
+        days = [resolve_day(today_local + timedelta(days=offset), cfg) for offset in range(14)]
+        direct_schedule = cfg.calendar.overrides.get(chosen, "")
+        direct_reason = cfg.calendar.no_bell_dates.get(chosen, "")
         return render(
             request,
             "calendar.html",
@@ -201,43 +267,73 @@ def create_app(
             days=days,
             schedules=cfg.schedules,
             current=resolve_day(chosen, cfg),
-            tomorrow=date.today() + timedelta(days=1),
+            direct_schedule=direct_schedule,
+            direct_reason=direct_reason,
+            config_hash=cfg.hash,
+            tomorrow=today_local + timedelta(days=1),
         )
 
-    def write_calendar(day: date, schedule_name: str | None, reason: str | None) -> None:
+    def write_calendar(
+        day: date,
+        schedule_name: str | None,
+        reason: str | None,
+        expected_hash: str,
+    ) -> None:
         path = directory / "calendar.yaml"
-        cfg = config()
-        backup_dir = cfg.state_path / "config-backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        backup = backup_dir / f"calendar-{datetime.now(ZoneInfo(cfg.settings.timezone)):%Y%m%dT%H%M%S%f}.yaml"
-        shutil.copy2(path, backup)
-        yaml = YAML()
-        yaml.preserve_quotes = True
-        with path.open("r", encoding="utf-8") as handle:
-            document = yaml.load(handle)
-        calendar = document["calendar"]
-        calendar.setdefault("overrides", {})
-        calendar.setdefault("no_bell_dates", {})
-        calendar["overrides"].pop(day, None)
-        calendar["overrides"].pop(day.isoformat(), None)
-        calendar["no_bell_dates"].pop(day, None)
-        calendar["no_bell_dates"].pop(day.isoformat(), None)
-        if reason:
-            calendar["no_bell_dates"][day] = reason
-        elif schedule_name:
-            calendar["overrides"][day] = schedule_name
-        temporary = path.with_suffix(".yaml.tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            yaml.dump(document, handle)
-        temporary.replace(path)
-        try:
-            load_config(directory)  # validate before announcing success/reload
-        except ConfigLoadError:
-            shutil.copy2(backup, path)
-            raise
-        backups = sorted(backup_dir.glob("calendar-*.yaml"), key=lambda item: item.stat().st_mtime)
-        for old_backup in backups[:-30]:
-            old_backup.unlink()
+        with calendar_lock:
+            cfg = config()
+            if not expected_hash or not secrets.compare_digest(expected_hash, cfg.hash):
+                raise HTTPException(
+                    status_code=409,
+                    detail="The calendar changed after this page loaded. Refresh and try again.",
+                )
+            backup_dir = cfg.state_path / "config-backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup = backup_dir / (
+                f"calendar-{datetime.now(ZoneInfo(cfg.settings.timezone)):%Y%m%dT%H%M%S%f}.yaml"
+            )
+            shutil.copy2(path, backup)
+            yaml = YAML()
+            yaml.preserve_quotes = True
+            with path.open("r", encoding="utf-8") as handle:
+                document = yaml.load(handle)
+            calendar = document["calendar"]
+            calendar.setdefault("overrides", {})
+            calendar.setdefault("no_bell_dates", {})
+            calendar["overrides"].pop(day, None)
+            calendar["overrides"].pop(day.isoformat(), None)
+            calendar["no_bell_dates"].pop(day, None)
+            calendar["no_bell_dates"].pop(day.isoformat(), None)
+            if reason:
+                calendar["no_bell_dates"][day] = reason
+            elif schedule_name:
+                calendar["overrides"][day] = schedule_name
+            temporary_name: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=path.parent,
+                    prefix="calendar-",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temporary_name = handle.name
+                    yaml.dump(document, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                Path(temporary_name).replace(path)
+                load_config(directory)  # validate before announcing success/reload
+            except Exception:
+                shutil.copy2(backup, path)
+                if temporary_name:
+                    Path(temporary_name).unlink(missing_ok=True)
+                raise
+            backups = sorted(
+                backup_dir.glob("calendar-*.yaml"), key=lambda item: item.stat().st_mtime
+            )
+            for old_backup in backups[:-30]:
+                old_backup.unlink()
         if reload_callback:
             reload_callback()
 
@@ -247,14 +343,29 @@ def create_app(
         selected: date = Form(),  # noqa: B008
         schedule_name: str = Form(default=""),
         no_bell_reason: str = Form(default=""),
+        calendar_action: str = Form(default=""),
+        config_hash: str = Form(default=""),
+        csrf: str = Form(),
     ) -> RedirectResponse:
         require_auth(request)
+        verify_csrf(request, csrf)
         cfg = config()
         if schedule_name and schedule_name not in cfg.schedule_map:
             raise HTTPException(400, "That schedule does not exist")
-        if not schedule_name and not no_bell_reason.strip():
+        if not calendar_action:
+            calendar_action = "no_bells" if no_bell_reason.strip() else "schedule"
+        if calendar_action not in {"schedule", "no_bells", "default"}:
+            raise HTTPException(400, "Choose a valid calendar action")
+        if calendar_action == "schedule" and not schedule_name:
             raise HTTPException(400, "Choose a schedule or enter a no-bell reason")
-        write_calendar(selected, schedule_name or None, no_bell_reason.strip() or None)
+        if calendar_action == "no_bells" and not no_bell_reason.strip():
+            raise HTTPException(400, "Enter a reason for the no-bell day")
+        write_calendar(
+            selected,
+            schedule_name if calendar_action == "schedule" else None,
+            no_bell_reason.strip() if calendar_action == "no_bells" else None,
+            config_hash,
+        )
         LOGGER.info(
             "ui_action",
             extra={"action": "calendar_change", "target": selected.isoformat(), "result": "success"},
@@ -274,8 +385,10 @@ def create_app(
         sound: str = Form(),
         zone: str = Form(),
         override_hours: bool = Form(default=False),
+        csrf: str = Form(),
     ) -> HTMLResponse:
         require_auth(request)
+        verify_csrf(request, csrf)
         cfg = config()
         if zone not in cfg.zone_map or sound not in {path.name for path in cfg.sounds_path.iterdir()}:
             raise HTTPException(400, "Choose a valid sound and zone")
@@ -291,8 +404,13 @@ def create_app(
         )
 
     @app.post("/manual/fire")
-    def manual_fire(request: Request, confirm_token: str = Form()) -> RedirectResponse:
+    def manual_fire(
+        request: Request,
+        confirm_token: str = Form(),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
         require_auth(request)
+        verify_csrf(request, csrf)
         try:
             payload = signer.loads(confirm_token, max_age=120)
         except (BadSignature, SignatureExpired) as exc:
@@ -391,7 +509,20 @@ def create_app(
             )
         existing = scheduler.state.api_result(idempotency_key)
         if existing:
-            return JSONResponse({"idempotent_replay": True, **existing}, status_code=200)
+            request_hash = hashlib.sha256(trigger.model_dump_json().encode()).hexdigest()
+            if existing["request_hash"] and not secrets.compare_digest(
+                existing["request_hash"], request_hash
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency-Key was already used with a different request payload",
+                )
+            scheduler.state.expire_stale_api_request(idempotency_key, datetime.now(ZoneInfo(config().settings.timezone)))
+            existing = scheduler.state.api_result(idempotency_key) or existing
+            status_code = 409 if existing["status"] == "indeterminate" else 200
+            return JSONResponse(
+                {"idempotent_replay": True, **existing}, status_code=status_code
+            )
         cfg = config()
         if trigger.zone not in cfg.zone_map:
             raise HTTPException(status_code=400, detail="Unknown zone")
@@ -406,7 +537,8 @@ def create_app(
                 detail="The emergency API key is required for emergency priority or hours override",
             )
         now = datetime.now(ZoneInfo(cfg.settings.timezone))
-        if not scheduler.state.claim_api_request(idempotency_key, now):
+        request_hash = hashlib.sha256(trigger.model_dump_json().encode()).hexdigest()
+        if not scheduler.state.claim_api_request(idempotency_key, now, request_hash):
             result = scheduler.state.api_result(idempotency_key) or {
                 "status": "processing",
                 "detail": "another worker claimed this request",
