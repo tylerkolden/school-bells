@@ -51,15 +51,17 @@ jobs:
           python -m build --wheel
       - name: Build offline Raspberry Pi wheelhouse
         run: |
-          mkdir -p wheelhouse
-          python -m pip download \
-            --dest wheelhouse \
-            --only-binary=:all: \
-            --platform manylinux2014_aarch64 \
-            --implementation cp \
-            --python-version 311 \
-            --abi cp311 \
-            dist/bell_system-*.whl
+          for abi in cp311 cp312 cp313; do
+            mkdir -p "wheelhouse/${abi}"
+            python -m pip download \
+              --dest "wheelhouse/${abi}" \
+              --only-binary=:all: \
+              --platform manylinux2014_aarch64 \
+              --implementation cp \
+              --python-version "${abi#cp}" \
+              --abi "${abi}" \
+              dist/bell_system-*.whl
+          done
       - name: Assemble production appliance package
         env:
           RELEASE_TAG: ${{ github.ref_name }}

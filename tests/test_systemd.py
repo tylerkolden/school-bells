@@ -57,5 +57,8 @@ def test_installer_stages_before_atomic_activation_and_supports_offline_wheels()
     restart = installer.index("systemctl restart bell-system.service")
     assert preflight < activation < restart
     assert "--no-index --find-links" in installer
+    assert "cp311|cp312|cp313" in installer
+    assert 'wheelhouse/$runtime_abi' in installer
+    assert "requires 64-bit ARM" in installer
     unit = (ROOT / "deploy" / "bell-system.service").read_text(encoding="utf-8")
     assert "WorkingDirectory=/opt/bell/current" in unit

@@ -22,8 +22,8 @@ An accepted release must be all of the following:
 - a safe regular-file archive within fixed compressed, expanded-size, and member-count limits.
 
 The release workflow runs lint, tests with the coverage gate, dependency audit, and package build.
-It then includes an ARM64/Python 3.11 wheelhouse, so installation does not execute downloads from
-PyPI, generates GitHub build-provenance attestation, and publishes the archive. Third-party GitHub
+It then includes ARM64 wheelhouses for Python 3.11, 3.12, and 3.13, so installation does not execute
+downloads from PyPI, generates GitHub build-provenance attestation, and publishes the archive. Third-party GitHub
 Actions are pinned to full commits.
 
 The Pi verifies the immutable release metadata, exact publisher, declared size, and SHA-256 digest
