@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import hmac
 import logging
 import os
 import secrets
@@ -117,7 +116,6 @@ def create_app(
     app.state.config_dir = directory
     app.state.scheduler = scheduler
     rate_limiter = RateLimiter(load_config(directory).settings.api_rate_limit_per_minute)
-    rate_limit_key = secrets.token_bytes(32)
     login_limiter = RateLimiter(5, 300.0)
     calendar_lock = threading.Lock()
     update_lock = threading.Lock()
@@ -188,8 +186,7 @@ def create_app(
             scope = "normal"
         else:
             raise HTTPException(status_code=401, detail="A valid Bell API key is required")
-        identity = hmac.digest(rate_limit_key, supplied.encode(), "sha256").hex()
-        if not rate_limiter.allow(identity):
+        if not rate_limiter.allow(scope):
             raise HTTPException(status_code=429, detail="Automation rate limit exceeded")
         return scope
 
