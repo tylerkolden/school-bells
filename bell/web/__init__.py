@@ -107,7 +107,10 @@ def create_app(
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
+        started = time.monotonic()
+        request_id = secrets.token_hex(8)
         response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -119,6 +122,17 @@ def create_app(
             response.headers["Cache-Control"] = "no-store"
         if secure_transport:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        LOGGER.info(
+            "http_request",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+                "duration_seconds": round(time.monotonic() - started, 6),
+                "client": request.client.host if request.client else "unknown",
+            },
+        )
         return response
 
     def config() -> BellConfig:

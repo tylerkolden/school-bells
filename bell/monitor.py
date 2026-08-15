@@ -6,6 +6,7 @@ import logging
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
@@ -99,34 +100,36 @@ class EndpointMonitor:
         self.config = config
 
     def check_once(self) -> list[DeliveryOutcome]:
-        outcomes: list[DeliveryOutcome] = []
-        for destination in self.config.destinations:
-            if not destination.enabled:
-                continue
-            started = time.monotonic()
-            try:
-                if destination.protocol == "multicast":
-                    outcome = self._check_multicast(destination)
-                elif destination.protocol == "sip":
-                    outcome = SIPClient(destination, self.config.settings.interface_ip).options()
-                else:
-                    outcome = WebhookClient().check(destination)
-            except Exception as exc:
-                LOGGER.exception(
-                    "endpoint_probe_failed", extra={"destination": destination.name}
-                )
-                outcome = DeliveryOutcome(
-                    destination.name,
-                    destination.protocol,
-                    False,
-                    "probe_error",
-                    str(exc),
-                    1,
-                    time.monotonic() - started,
-                )
+        destinations = [item for item in self.config.destinations if item.enabled]
+        if not destinations:
+            return []
+        with ThreadPoolExecutor(
+            max_workers=min(8, len(destinations)), thread_name_prefix="endpoint-probe"
+        ) as pool:
+            outcomes = list(pool.map(self._probe, destinations))
+        for outcome in outcomes:
             self.registry.record(outcome)
-            outcomes.append(outcome)
         return outcomes
+
+    def _probe(self, destination: Destination) -> DeliveryOutcome:
+        started = time.monotonic()
+        try:
+            if destination.protocol == "multicast":
+                return self._check_multicast(destination)
+            if destination.protocol == "sip":
+                return SIPClient(destination, self.config.settings.interface_ip).options()
+            return WebhookClient().check(destination)
+        except Exception as exc:
+            LOGGER.exception("endpoint_probe_failed", extra={"destination": destination.name})
+            return DeliveryOutcome(
+                destination.name,
+                destination.protocol,
+                False,
+                "probe_error",
+                str(exc),
+                1,
+                time.monotonic() - started,
+            )
 
     def _run(self) -> None:
         while not self._stop.is_set():

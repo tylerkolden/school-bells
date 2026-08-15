@@ -134,6 +134,7 @@ def main() -> int:
         health_ok = (
             response.status == 200
             and health.get("config_valid") is True
+            and health.get("ready") is True
             and "kill_switch" in health
             and not unhealthy
         )
@@ -144,19 +145,56 @@ def main() -> int:
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         health_ok, health_reason = False, str(exc)
     checks.append(Check("health endpoint", health_ok, health_reason))
+    metrics_url = args.health_url.rsplit("/", 1)[0] + "/metrics"
+    try:
+        with urllib.request.urlopen(metrics_url, timeout=3) as response:
+            metrics = response.read().decode("utf-8")
+        metrics_ok = response.status == 200 and "bell_ready 1" in metrics
+        metrics_reason = f"HTTP {response.status}; bell_ready={'present' if 'bell_ready 1' in metrics else 'not ready'}"
+    except (OSError, urllib.error.URLError) as exc:
+        metrics_ok, metrics_reason = False, str(exc)
+    checks.append(Check("metrics endpoint", metrics_ok, metrics_reason))
 
     synced, sync_detail = clock_sync_status()
     rtc_path = Path("/sys/class/rtc/rtc0")
 
     try:
         config = load_config(args.config_dir)
-        raw_files = [transcode(config.sounds_path / name) for name in sorted({e.sound for s in config.schedules for e in s.events} | {i.sound for i in config.standing_items if i.enabled})]
-        checks.append(Check("configuration/audio", True, f"valid; transcoded {len(raw_files)} unique sounds"))
+        sound_names = {
+            name
+            for schedule in config.schedules
+            for event in schedule.events
+            for name in (event.sound, event.pre_tone)
+            if name
+        } | {
+            name
+            for item in config.standing_items
+            if item.enabled
+            for name in (item.sound, item.pre_tone)
+            if name
+        }
+        codecs = {
+            codec
+            for destination in config.destinations
+            if destination.enabled and destination.protocol in {"multicast", "sip"}
+            for codec in destination.codecs
+        }
+        for name in sorted(sound_names):
+            for codec in sorted(codecs):
+                transcode(config.sounds_path / name, codec)
+        pcmu_files = [transcode(config.sounds_path / name) for name in sorted(sound_names)]
+        checks.append(
+            Check(
+                "configuration/audio",
+                True,
+                f"valid; prepared {len(sound_names)} sounds across {len(codecs)} codecs",
+            )
+        )
     except (ConfigLoadError, OSError, RuntimeError) as exc:
         print(f"Configuration unavailable: {exc}")
         checks.append(Check("configuration/audio", False, str(exc)))
         config = None
-        raw_files = []
+        pcmu_files = []
 
     rtc_required = config.settings.rtc_required if config else False
     clock_ok = synced is True and (not rtc_required or rtc_path.exists())
@@ -168,12 +206,12 @@ def main() -> int:
         )
     )
 
-    if raw_files:
+    if pcmu_files:
         if config is None:
             passed, reason = False, "configuration unavailable"
         else:
             try:
-                passed, reason = loopback_check(raw_files[0], config.settings.interface_ip)
+                passed, reason = loopback_check(pcmu_files[0], config.settings.interface_ip)
             except OSError as exc:
                 passed, reason = False, f"multicast loopback setup failed: {exc}"
         checks.append(Check("loopback RTP", passed, reason))

@@ -17,3 +17,16 @@ def test_structured_rotating_log_shape(tmp_path: Path) -> None:
     assert record["zone"] == "indoors"
     assert record["packets"] == 3
     assert record["timestamp"].endswith("+00:00")
+
+
+def test_structured_logs_redact_nested_secrets(tmp_path: Path) -> None:
+    path = configure_logging(tmp_path)
+    logging.getLogger("bell.test").info(
+        "request",
+        extra={"api_key": "never-log-me", "target": {"password": "also-secret", "zone": "all"}},
+    )
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    record = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["api_key"] == "[REDACTED]"
+    assert record["target"] == {"password": "[REDACTED]", "zone": "all"}

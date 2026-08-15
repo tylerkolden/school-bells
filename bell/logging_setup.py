@@ -10,6 +10,18 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+SENSITIVE_FRAGMENTS = ("authorization", "cookie", "password", "secret", "token", "api_key")
+
+
+def _redact(value: Any, key: str = "") -> Any:
+    if any(fragment in key.lower() for fragment in SENSITIVE_FRAGMENTS):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {str(item_key): _redact(item_value, str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact(item) for item in value]
+    return value
+
 
 class JsonFormatter(logging.Formatter):
     _standard = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
@@ -23,7 +35,7 @@ class JsonFormatter(logging.Formatter):
         }
         for key, value in record.__dict__.items():
             if key not in self._standard and not key.startswith("_"):
-                payload[key] = value
+                payload[key] = _redact(value, key)
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, default=str, separators=(",", ":"))

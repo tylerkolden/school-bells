@@ -155,6 +155,8 @@ The office service exposes JSON endpoints on the same port as the UI:
 The service-only `GET /ready` endpoint returns HTTP 503 until the clock, scheduler, monitor, and
 every required destination are ready. This makes it suitable for systemd and external watchdogs;
 the JSON response names each failing readiness condition.
+`GET /metrics` on the same localhost-only port exposes a small Prometheus text endpoint for readiness,
+uptime, and per-destination health without adding a metrics framework dependency.
 
 Set separate `BELL_API_KEY` and `BELL_EMERGENCY_API_KEY` values. Every request uses
 `X-Bell-API-Key`; triggers also require a stable `Idempotency-Key`. Only the emergency key can use an
@@ -195,7 +197,9 @@ The front-office UI binds on `0.0.0.0:8080`; firewall it to the trusted school L
 publish it to the internet. The health service stays on `127.0.0.1:8000`.
 
 Run the installer as root so it can install and enable the systemd unit; it performs Python
-package installation as the unprivileged `bell` account:
+package installation as the unprivileged `bell` account. The installer copies a checkout when run
+outside `/opt/bell`, preserves local configuration and sounds, creates a 90-day deployment backup,
+validates the installed code/config/audio before restart, and only then activates the hardened unit:
 
 ```bash
 sudo bash deploy/install.sh
@@ -205,5 +209,9 @@ If an RTC is installed and verified, set `rtc_required: true` so acceptance chec
 
 After install, run `python scripts/acceptance.py`. First live-test one channel-23 bell during a
 lunch period. Do not load the full production schedule until that controlled test is observed.
+
+The systemd unit uses readiness notification and a watchdog heartbeat. If the scheduler, endpoint
+monitor, health server, or operator server dies, the process exits nonzero and systemd restarts it.
+It runs with no Linux capabilities and a restricted filesystem/device/namespace view.
 
 The product comparison and standards rationale are documented in [docs/RESEARCH.md](docs/RESEARCH.md).
