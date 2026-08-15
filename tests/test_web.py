@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
+from bell import __version__
 from bell.config import load_config
 from bell.scheduler import BellScheduler
 from bell.update import load_update_status
@@ -122,6 +123,24 @@ def test_update_requires_auth_csrf_and_two_step_confirmation(config_tree: Path) 
     assert status["phase"] == "idle"
     request = config_tree.parent / "state" / "update" / "request.json"
     assert json.loads(request.read_text(encoding="utf-8"))["action"] == "check"
+
+
+def test_updates_are_disabled_safely_for_local_docker(config_tree: Path, monkeypatch) -> None:
+    monkeypatch.setenv("BELL_OTA_ENABLED", "false")
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+    page = client.get("/updates")
+    assert page.status_code == 200
+    assert "Production OTA is disabled in Docker" in page.text
+    assert __version__ in page.text
+    assert "Check for updates" not in page.text
+    response = client.post(
+        "/updates/check",
+        data={"csrf": hidden(page, "csrf")},
+        follow_redirects=False,
+    )
+    assert response.status_code == 503
+    assert not (config_tree.parent / "state" / "update" / "request.json").exists()
 
 
 def test_update_confirmation_is_bound_to_checked_release(config_tree: Path) -> None:

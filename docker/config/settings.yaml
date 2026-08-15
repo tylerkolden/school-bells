@@ -1,0 +1,24 @@
+settings:
+  timezone: America/Denver
+  # Bind to the container interface. This profile has no multicast destinations.
+  interface_ip: 0.0.0.0
+  wire_format: plain_rtp
+  rtc_required: false
+  endpoint_check_interval_seconds: 15
+  api_rate_limit_per_minute: 30
+  # Containers inherit the host clock but do not run systemd/timedatectl.
+  clock_sync_required: false
+  max_audio_seconds: 30
+  max_page_seconds: 120
+  sounds_dir: sounds
+  state_dir: state
+  log_dir: logs
+
+safety:
+  allowed_hours_start: "06:30"
+  allowed_hours_end: "17:30"
+  max_events_per_day: 40
+  max_repeats: 4
+  emergency_priority_threshold: 90
+  kill_switch_enabled: false
+  kill_switch_until:

@@ -1,0 +1,67 @@
+name: school-bell-local
+
+services:
+  bell:
+    build:
+      context: .
+    image: school-bell-local:latest
+    init: true
+    read_only: true
+    restart: unless-stopped
+    depends_on:
+      receiver:
+        condition: service_healthy
+    environment:
+      BELL_UI_PASSWORD: ${BELL_UI_PASSWORD:-local-test-only}
+      BELL_UI_SESSION_SECRET: ${BELL_UI_SESSION_SECRET:-local-docker-session-secret-not-for-production-2026}
+      BELL_OTA_ENABLED: "false"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - bell-data:/var/lib/bell
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - local-test
+
+  receiver:
+    build:
+      context: .
+    image: school-bell-local:latest
+    command: ["python", "-m", "bell.simulator", "--host", "0.0.0.0", "--port", "9000"]
+    init: true
+    read_only: true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "127.0.0.1:9000:9000"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - local-test
+
+networks:
+  local-test:
+    driver: bridge
+
+volumes:
+  bell-data:
