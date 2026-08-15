@@ -1,0 +1,21 @@
+schedules:
+  - name: Regular Day
+    events:
+      - {time: "08:00", sound: class-bell.wav, zone: indoors, label: First bell}
+      - {time: "10:15", sound: class-bell.wav, zone: indoors, label: Morning class change}
+      - {time: "12:00", sound: recess-bell.wav, zone: outdoors, label: Lunch recess}
+      - {time: "15:10", sound: dismissal-bell.wav, zone: outdoors, label: Dismissal}
+  - name: Mass Day
+    events:
+      - {time: "08:00", sound: class-bell.wav, zone: indoors, label: First bell}
+      - {time: "09:20", sound: class-bell.wav, zone: indoors, label: Prepare for Mass}
+      - {time: "15:10", sound: dismissal-bell.wav, zone: outdoors, label: Dismissal}
+  - name: Half Day
+    events:
+      - {time: "08:00", sound: class-bell.wav, zone: indoors, label: First bell}
+      - {time: "12:00", sound: dismissal-bell.wav, zone: outdoors, label: Half-day dismissal}
+
+standing_items:
+  - {time: "08:05", sound: prayer.wav, zone: indoors, label: Morning prayer, enabled: true}
+  - {time: "12:05", sound: angelus.wav, zone: indoors, label: Angelus, enabled: true}
+  - {time: "15:05", sound: prayer.wav, zone: indoors, label: Dismissal prayer, enabled: true}

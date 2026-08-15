@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from ruamel.yaml import YAML
 from starlette.middleware.sessions import SessionMiddleware
 
+from bell import __version__
 from bell.config import BellConfig, ConfigLoadError, load_config
 from bell.safety import evaluate_fire
 from bell.scheduler import BellScheduler, PlannedEvent, resolve_day
@@ -96,6 +97,12 @@ def create_app(
         raise RuntimeError("BELL_UI_PASSWORD must be set before starting the front-office UI")
     secret = os.environ.get("BELL_UI_SESSION_SECRET") or secrets.token_urlsafe(32)
     secure_transport = bool(os.environ.get("BELL_TLS_CERTFILE"))
+    updates_enabled = os.environ.get("BELL_OTA_ENABLED", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
     signer = URLSafeTimedSerializer(secret, salt="bell-manual-confirm")
     update_signer = URLSafeTimedSerializer(secret, salt="bell-update-confirm")
     app = FastAPI(title="School Bell Office", docs_url=None, redoc_url=None)
@@ -114,6 +121,13 @@ def create_app(
     login_limiter = RateLimiter(5, 300.0)
     calendar_lock = threading.Lock()
     update_lock = threading.Lock()
+
+    def require_updates_enabled() -> None:
+        if not updates_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="Production OTA is disabled in this local test environment",
+            )
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -488,17 +502,34 @@ def create_app(
     @app.get("/updates", response_class=HTMLResponse)
     def updates_page(request: Request, queued: bool = False) -> HTMLResponse:
         require_auth(request)
-        cfg = config()
-        try:
-            status = load_update_status(cfg.state_path)
-        except UpdateRequestError as exc:
-            status = {"phase": "failed", "message": str(exc)}
-        return render(request, "updates.html", status=status, queued=queued)
+        if updates_enabled:
+            cfg = config()
+            try:
+                status = load_update_status(cfg.state_path)
+            except UpdateRequestError as exc:
+                status = {"phase": "failed", "message": str(exc)}
+        else:
+            status = {
+                "phase": "disabled",
+                "installed_version": __version__,
+                "message": (
+                    "Production OTA is disabled in Docker. Rebuild the local image to test newer "
+                    "code; use the signed updater only on the Raspberry Pi appliance."
+                ),
+            }
+        return render(
+            request,
+            "updates.html",
+            status=status,
+            queued=queued,
+            updates_enabled=updates_enabled,
+        )
 
     @app.post("/updates/check")
     def updates_check(request: Request, csrf: str = Form()) -> RedirectResponse:
         require_auth(request)
         verify_csrf(request, csrf)
+        require_updates_enabled()
         cfg = config()
         try:
             with update_lock:
@@ -520,6 +551,7 @@ def create_app(
     ) -> HTMLResponse:
         require_auth(request)
         verify_csrf(request, csrf)
+        require_updates_enabled()
         cfg = config()
         try:
             status = load_update_status(cfg.state_path)
@@ -547,6 +579,7 @@ def create_app(
     ) -> RedirectResponse:
         require_auth(request)
         verify_csrf(request, csrf)
+        require_updates_enabled()
         try:
             payload = update_signer.loads(confirm_token, max_age=300)
         except (BadSignature, SignatureExpired) as exc:

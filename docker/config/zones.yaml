@@ -1,0 +1,13 @@
+zones:
+  - name: indoors
+    channel: 23
+    destinations: [all]
+    description: Local simulation of the indoor paging zone.
+  - name: outdoors
+    channel: 24
+    destinations: [all]
+    description: Local simulation of the outdoor paging zone.
+  - name: everywhere
+    channel: 25
+    destinations: [all]
+    description: Local simulation of the all-call paging zone.

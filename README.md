@@ -52,8 +52,53 @@ after membership entries age out.
 
 Use a quality SD card or USB SSD, a small UPS, and preferably a DS3231 real-time clock. A Pi
 has no battery-backed clock; after a power failure, NTP and the RTC protect wall-clock bells.
-Do not containerize this service. Host networking, multicast interface selection, clock status,
-systemd readiness, and hardware RTC visibility should remain explicit and easy to diagnose.
+Do not use the local Docker profile in production. Host networking, multicast interface selection,
+clock status, systemd readiness, and hardware RTC visibility should remain explicit and easy to
+diagnose on the Raspberry Pi.
+
+## Test locally on Windows with Docker
+
+Install and start [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/)
+using its Linux/WSL 2 engine. Then double-click `Start-Local-Test.cmd`, or run this from PowerShell
+in the repository directory:
+
+```powershell
+docker compose up --build --detach --wait
+```
+
+Open <http://localhost:8080> and sign in with the default local-only password
+`local-test-only`. Open <http://localhost:9000> in a second tab to see each simulated page arrive.
+The stack uses a dedicated bridge network, both ports bind only to Windows loopback, all Linux
+capabilities are dropped, and the only configured delivery destination is the bundled HTTP receiver.
+It cannot send multicast to phones or horns. Production OTA is also disabled; rebuild the image to
+test newer code.
+
+The named Docker volume preserves calendar edits, logs, cached audio, and test history between
+starts. Useful commands:
+
+```powershell
+# Follow application and receiver logs.
+docker compose logs --follow
+
+# Stop containers but retain test data (or double-click Stop-Local-Test.cmd).
+docker compose down
+
+# Reset all local test configuration and history to repository defaults.
+docker compose down --volumes
+docker compose up --build --detach --wait
+```
+
+Override the test password before starting if desired:
+
+```powershell
+$env:BELL_UI_PASSWORD = "a-long-local-test-password"
+docker compose up --build --detach --wait
+```
+
+This profile tests the real UI, scheduler, safety checks, configuration editing, FFmpeg input
+validation, SQLite history, health monitoring, and HTTP delivery. It intentionally does not prove
+Raspberry Pi systemd/OTA behavior, RTC/NTP integration, physical audio output, multicast routing,
+or Poly Group Page compatibility. Complete the Pi acceptance procedure before live deployment.
 
 ## Install for development
 

@@ -37,3 +37,24 @@ jobs:
         run: pip-audit
       - name: Build distributions
         run: python -m build
+
+  docker-smoke:
+    name: Safe Docker profile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate Compose model
+        run: docker compose config --quiet
+      - name: Build and start local stack
+        run: docker compose up --build --detach --wait --wait-timeout 180
+      - name: Smoke-test UI and receiver
+        run: |
+          curl --fail --silent --show-error http://127.0.0.1:8080/login >/dev/null
+          curl --fail --silent --show-error http://127.0.0.1:9000/health
+          curl --fail --silent --show-error http://127.0.0.1:9000/events
+      - name: Print container logs after a failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop local stack
+        if: always()
+        run: docker compose down --volumes

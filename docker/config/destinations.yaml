@@ -1,0 +1,12 @@
+destinations:
+  # This is the only enabled target. It records metadata in the local receiver UI.
+  - name: all
+    protocol: http
+    port: 9000
+    webhook_url: http://receiver:9000/page
+    healthcheck_url: http://receiver:9000/health
+    allow_insecure_http: true
+    timeout_seconds: 2
+    retries: 1
+    required: true
+    enabled: true
