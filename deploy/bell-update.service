@@ -1,0 +1,36 @@
+[Unit]
+Description=Verify and install a school bell production release
+After=network-online.target bell-system.service
+Wants=network-online.target
+ConditionPathExists=/opt/bell/state/update/request.json
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /usr/local/lib/bell-system/ota_updater.py process
+TimeoutStartSec=15min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectSystem=strict
+ReadWritePaths=/opt/bell /var/lib/bell-updater /var/backups/bell-system /etc/systemd/system /usr/local/lib/bell-system
+
+[Install]
+WantedBy=multi-user.target

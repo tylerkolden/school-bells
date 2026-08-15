@@ -31,6 +31,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from bell.config import BellConfig, ConfigLoadError, load_config
 from bell.safety import evaluate_fire
 from bell.scheduler import BellScheduler, PlannedEvent, resolve_day
+from bell.update import UpdateRequestError, load_update_status, queue_update_request
 
 LOGGER = logging.getLogger(__name__)
 ReloadCallback = Callable[[], None]
@@ -89,6 +90,7 @@ def create_app(
     secret = os.environ.get("BELL_UI_SESSION_SECRET") or secrets.token_urlsafe(32)
     secure_transport = bool(os.environ.get("BELL_TLS_CERTFILE"))
     signer = URLSafeTimedSerializer(secret, salt="bell-manual-confirm")
+    update_signer = URLSafeTimedSerializer(secret, salt="bell-update-confirm")
     app = FastAPI(title="School Bell Office", docs_url=None, redoc_url=None)
     app.add_middleware(
         SessionMiddleware,
@@ -104,6 +106,7 @@ def create_app(
     rate_limiter = RateLimiter(load_config(directory).settings.api_rate_limit_per_minute)
     login_limiter = RateLimiter(5, 300.0)
     calendar_lock = threading.Lock()
+    update_lock = threading.Lock()
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -475,6 +478,112 @@ def create_app(
         recent = scheduler.state.recent() if scheduler else []
         health = health_provider() if health_provider else None
         return render(request, "status.html", config=cfg, recent=recent, health=health)
+
+    @app.get("/updates", response_class=HTMLResponse)
+    def updates_page(request: Request, queued: bool = False) -> HTMLResponse:
+        require_auth(request)
+        cfg = config()
+        try:
+            status = load_update_status(cfg.state_path)
+        except UpdateRequestError as exc:
+            status = {"phase": "failed", "message": str(exc)}
+        return render(request, "updates.html", status=status, queued=queued)
+
+    @app.post("/updates/check")
+    def updates_check(request: Request, csrf: str = Form()) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        cfg = config()
+        try:
+            with update_lock:
+                request_id = queue_update_request(cfg.state_path, "check")
+        except UpdateRequestError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        LOGGER.info(
+            "ui_action",
+            extra={"action": "update_check", "target": request_id, "result": "queued"},
+        )
+        return RedirectResponse("/updates?queued=true", status_code=303)
+
+    @app.post("/updates/prepare", response_class=HTMLResponse)
+    def updates_prepare(
+        request: Request,
+        tag: str = Form(),
+        digest: str = Form(),
+        csrf: str = Form(),
+    ) -> HTMLResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        cfg = config()
+        try:
+            status = load_update_status(cfg.state_path)
+        except UpdateRequestError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        release = status.get("release")
+        if (
+            status.get("phase") != "update_available"
+            or not isinstance(release, dict)
+            or release.get("tag") != tag
+            or release.get("digest") != digest
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Release information changed or expired. Check for updates again.",
+            )
+        token = update_signer.dumps({"tag": tag, "digest": digest})
+        return render(request, "update_confirm.html", release=release, token=token)
+
+    @app.post("/updates/install")
+    def updates_install(
+        request: Request,
+        confirm_token: str = Form(),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        try:
+            payload = update_signer.loads(confirm_token, max_age=300)
+        except (BadSignature, SignatureExpired) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Update confirmation expired or is invalid. Check again.",
+            ) from exc
+        tag = payload.get("tag") if isinstance(payload, dict) else None
+        digest = payload.get("digest") if isinstance(payload, dict) else None
+        if not isinstance(tag, str) or not isinstance(digest, str):
+            raise HTTPException(status_code=400, detail="Update confirmation is invalid")
+        cfg = config()
+        try:
+            status = load_update_status(cfg.state_path)
+            release = status.get("release")
+            if (
+                status.get("phase") != "update_available"
+                or not isinstance(release, dict)
+                or release.get("tag") != tag
+                or release.get("digest") != digest
+            ):
+                raise UpdateRequestError(
+                    "Release information changed or expired. Check for updates again."
+                )
+            with update_lock:
+                request_id = queue_update_request(
+                    cfg.state_path,
+                    "install",
+                    tag=tag,
+                    digest=digest,
+                )
+        except UpdateRequestError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        LOGGER.warning(
+            "ui_action",
+            extra={
+                "action": "production_update",
+                "target": {"tag": tag, "digest": digest},
+                "request_id": request_id,
+                "result": "queued",
+            },
+        )
+        return RedirectResponse("/updates?queued=true", status_code=303)
 
     @app.get("/api/v1/health")
     def api_health(request: Request) -> dict[str, Any]:

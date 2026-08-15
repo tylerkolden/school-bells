@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from bell.config import load_config
 from bell.scheduler import BellScheduler
+from bell.update import load_update_status
 from bell.web import create_app
 
 
@@ -100,6 +102,70 @@ def test_out_of_hours_manual_is_blocked_without_override(config_tree: Path, monk
     )
     assert result.status_code == 303
     assert "outside%20allowed%20bell%20hours" in result.headers["location"]
+
+
+def test_update_requires_auth_csrf_and_two_step_confirmation(config_tree: Path) -> None:
+    client = TestClient(create_app(config_tree, password="test"))
+    assert client.get("/updates", follow_redirects=False).status_code == 303
+    login(client)
+    page = client.get("/updates")
+    assert page.status_code == 200
+    assert "Updates are never automatic" in page.text
+    assert client.post("/updates/check", data={"csrf": "wrong"}).status_code == 403
+    queued = client.post(
+        "/updates/check",
+        data={"csrf": hidden(page, "csrf")},
+        follow_redirects=False,
+    )
+    assert queued.status_code == 303
+    status = load_update_status(config_tree.parent / "state")
+    assert status["phase"] == "idle"
+    request = config_tree.parent / "state" / "update" / "request.json"
+    assert json.loads(request.read_text(encoding="utf-8"))["action"] == "check"
+
+
+def test_update_confirmation_is_bound_to_checked_release(config_tree: Path) -> None:
+    state = config_tree.parent / "state" / "update"
+    state.mkdir(parents=True)
+    digest = "sha256:" + "a" * 64
+    (state / "status.json").write_text(
+        json.dumps(
+            {
+                "phase": "update_available",
+                "message": "Release available",
+                "installed_version": "0.1.0",
+                "release": {
+                    "tag": "v0.2.0",
+                    "digest": digest,
+                    "published_at": "2026-08-15T12:00:00Z",
+                    "notes": "Hardened update",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+    page = client.get("/updates")
+    prepared = client.post(
+        "/updates/prepare",
+        data={"tag": "v0.2.0", "digest": digest, "csrf": hidden(page, "csrf")},
+    )
+    assert prepared.status_code == 200
+    assert "Final confirmation" in prepared.text
+    result = client.post(
+        "/updates/install",
+        data={
+            "confirm_token": hidden(prepared, "confirm_token"),
+            "csrf": hidden(prepared, "csrf"),
+        },
+        follow_redirects=False,
+    )
+    assert result.status_code == 303
+    request = json.loads((state / "request.json").read_text(encoding="utf-8"))
+    assert request["action"] == "install"
+    assert request["tag"] == "v0.2.0"
+    assert request["digest"] == digest
 
 
 def test_automation_api_is_authenticated_emergency_scoped_and_idempotent(

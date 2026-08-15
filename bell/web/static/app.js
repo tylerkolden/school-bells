@@ -25,3 +25,20 @@ if (noBellReason && noBellAction) {
     if (noBellReason.value.trim()) noBellAction.checked = true;
   });
 }
+
+const autoRefresh = document.querySelector("[data-auto-refresh]");
+if (autoRefresh) {
+  const refreshWhenReachable = async () => {
+    try {
+      const response = await window.fetch("/updates", { cache: "no-store" });
+      if (response.ok) {
+        window.location.replace("/updates");
+        return;
+      }
+    } catch (_error) {
+      // The service is expected to be briefly unreachable while switching releases.
+    }
+    window.setTimeout(refreshWhenReachable, 3000);
+  };
+  window.setTimeout(refreshWhenReachable, 2000);
+}

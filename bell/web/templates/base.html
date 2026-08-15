@@ -6,15 +6,15 @@
   <meta name="theme-color" content="#102a43">
   <title>{% block title %}School Bell{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', path='favicon.svg') }}" type="image/svg+xml">
-  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
-  <script defer src="{{ url_for('static', path='app.js') }}"></script>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}?v=0.2.0">
+  <script defer src="{{ url_for('static', path='app.js') }}?v=0.2.1"></script>
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to main content</a>
 {% if authenticated %}
 <header class="app-header">
   <a class="brand" href="/" aria-label="School Bell home"><span class="brand-mark" aria-hidden="true">B</span><span><strong>School Bell</strong><small>Operations console</small></span></a>
-  <nav aria-label="Primary navigation"><a href="/">Today</a><a href="/calendar">Calendar</a><a href="/manual">Ring now</a><a href="/status">System status</a><form action="/logout" method="post"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="nav-button">Sign out</button></form></nav>
+  <nav aria-label="Primary navigation"><a href="/">Today</a><a href="/calendar">Calendar</a><a href="/manual">Ring now</a><a href="/status">System status</a><a href="/updates">Updates</a><form action="/logout" method="post"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="nav-button">Sign out</button></form></nav>
 </header>
 {% endif %}
 <main id="main-content">{% block content %}{% endblock %}</main>
