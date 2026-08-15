@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from bell.config import load_config
 from bell.scheduler import BellScheduler
 from bell.update import load_update_status
-from bell.web import create_app
+from bell.web import APITrigger, _safe_log_text, create_app
 
 
 def hidden(response, name: str) -> str:
@@ -224,6 +224,19 @@ def test_automation_api_rejects_sound_path_escape(config_tree: Path, monkeypatch
         headers={"X-Bell-API-Key": "normal-key", "Idempotency-Key": "path-escape"},
     )
     assert response.status_code == 422
+
+
+def test_automation_fields_reject_controls_and_log_fields_are_single_line() -> None:
+    for field in ("sound", "zone", "label"):
+        values = {"sound": "bell.wav", "zone": "indoors", "label": "Automation"}
+        values[field] += "\nforged-entry"
+        try:
+            APITrigger(**values)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{field} accepted a log control character")
+    assert _safe_log_text("inside\r\nforged", 100) == "inside\\r\\nforged"
 
 
 def test_form_posts_require_csrf(config_tree: Path) -> None:

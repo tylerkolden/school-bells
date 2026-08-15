@@ -389,6 +389,7 @@ class SIPTransport:
         context = ssl.create_default_context(
             cafile=str(self.destination.tls_ca_file) if self.destination.tls_ca_file else None
         )
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         return context.wrap_socket(raw, server_hostname=self.destination.tls_server_name)
 
     def _stream_request(

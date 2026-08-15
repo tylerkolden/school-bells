@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import socket
+import ssl
 import threading
 from pathlib import Path
 
@@ -233,6 +234,46 @@ def test_tcp_transport_handles_provisional_then_final_response() -> None:
     thread.join(timeout=2)
     server.close()
     assert response.status == 200
+
+
+def test_tls_transport_requires_tls_1_2_or_newer(monkeypatch) -> None:
+    class FakeSocket:
+        def settimeout(self, _value) -> None:
+            pass
+
+        def bind(self, _address) -> None:
+            pass
+
+        def setsockopt(self, *_values) -> None:
+            pass
+
+        def connect(self, _address) -> None:
+            pass
+
+    class FakeContext:
+        minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+
+        def wrap_socket(self, raw, *, server_hostname):
+            assert server_hostname == "pbx.example.test"
+            return raw
+
+    raw = FakeSocket()
+    context = FakeContext()
+    monkeypatch.setattr(socket, "socket", lambda *_args: raw)
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: context)
+    destination = sip_destination(
+        sip_transport="tls",
+        tls_server_name="pbx.example.test",
+        port=5061,
+    )
+    result = SIPTransport(destination, "127.0.0.1")._connect_stream(
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        socket.IPPROTO_TCP,
+        ("127.0.0.1", 5061),
+    )
+    assert result is raw
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
 
 
 def test_options_monitor_validates_digest_credentials(monkeypatch) -> None:
