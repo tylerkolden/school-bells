@@ -1,0 +1,15 @@
+calendar:
+  weekday_defaults:
+    monday: Regular Day
+    tuesday: Regular Day
+    wednesday: Regular Day
+    thursday: Regular Day
+    friday: Regular Day
+    saturday:
+    sunday:
+  overrides:
+    2026-09-08: Mass Day
+  date_ranges: []
+  # Worked example; replace this demonstration date with a real closure as needed.
+  no_bell_dates:
+    2027-01-15: Snow day example

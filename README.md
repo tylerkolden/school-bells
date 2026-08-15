@@ -1,0 +1,189 @@
+# School Bell System
+
+This project runs a scheduled, fail-safe multicast paging transmitter for a Catholic K–12
+school. A Raspberry Pi sends G.711 PCMU audio to Yealink T31P phones and an Algo 8186 horn.
+It schedules in local wall-clock time, records every fire attempt in SQLite, refuses late or
+duplicate bells, and exposes a simple front-office UI.
+
+> **Deployment gate:** Poly Group Page's proprietary RTP extension is intentionally
+> uncalibrated. The system will not transmit a guessed header. Complete
+> [the capture procedure](docs/CAPTURE.md) on the phone VLAN before live use.
+
+## Zones
+
+All zones use `239.255.255.255:601`; the Poly channel is the zone selector.
+
+| Channel | Zone | Desk phones | Algo horn | Typical use |
+|---:|---|:---:|:---:|---|
+| 23 | Indoors | yes | no | class bells and prayer |
+| 24 | Outdoors | yes | yes | recess and dismissal |
+| 25 | Everywhere | yes | yes | emergency and all-call |
+
+Audio is PCMU (G.711 mu-law), 8 kHz mono, RTP payload type 0, in 20 ms/160-byte frames.
+
+## Architecture
+
+- `bell/wire/` builds packets. `PolyGroupPage` fails closed until calibrated from a capture.
+- `bell/audio.py` prepares, probes, caches, and transcodes audio with ffmpeg.
+- `bell/transmit.py` sends synchronized destination streams with cumulative pacing correction.
+- `bell/protocols/` provides SIP UDP/TCP/TLS paging and signed HTTP(S) delivery adapters.
+- `bell/delivery.py` fans one event out across required and optional protocol endpoints.
+- `bell/paging.py` serializes routine pages and cooperatively preempts them for emergencies.
+- `bell/monitor.py` probes endpoints, records health, and opens optional-endpoint circuit breakers.
+- `bell/config.py` loads and cross-validates the YAML configuration.
+- `bell/scheduler.py` resolves only the current day and provides at-most-once SQLite state.
+- `bell/safety.py` rechecks all safety rules immediately before every fire.
+- `bell/service.py` runs the scheduler and localhost health endpoints.
+- `bell/web/` is a password-protected, server-rendered front-office UI.
+- `bell/probe.py` and `bell/listen.py` are field diagnostic tools.
+
+## Network and hardware prerequisites
+
+Use a Raspberry Pi 4 or 5 with wired Ethernet on the same VLAN as the receivers. Do not use
+Wi-Fi: multicast may be dropped, rate-limited, or silently converted to unicast. Give the Pi a
+DHCP reservation (the example uses `192.168.10.20`). The switched network should have IGMP
+snooping **and an active IGMP querier**; snooping without a querier can make multicast stop
+after membership entries age out.
+
+Use a quality SD card or USB SSD, a small UPS, and preferably a DS3231 real-time clock. A Pi
+has no battery-backed clock; after a power failure, NTP and the RTC protect wall-clock bells.
+Do not containerize this service. Host networking, multicast interface selection, clock status,
+systemd readiness, and hardware RTC visibility should remain explicit and easy to diagnose.
+
+## Install for development
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools
+python -m pip install -e '.[dev]'
+pytest
+ruff check .
+python -m bell.config validate --config-dir config
+```
+
+Install `ffmpeg` first (`sudo apt install ffmpeg` on Raspberry Pi OS). The sample WAV files are
+safe placeholders; replace them with approved school recordings, run `python -m bell.audio prep`,
+and validate again. Run `python -m bell.service --check-only --config-dir config` on the target Pi.
+
+## Configuration
+
+Configuration is split into comment-friendly YAML files:
+
+- `settings.yaml`: timezone, wired interface IP, paths, wire format, and safety window.
+- `destinations.yaml`: multicast endpoint(s), TTL, and enable flags.
+- `zones.yaml`: channel and destination mapping plus plain-language descriptions.
+- `schedules.yaml`: named schedules and standing prayer items.
+- `calendar.yaml`: weekday defaults, date overrides/ranges, and no-bell dates.
+
+Example scheduled event:
+
+```yaml
+- time: "08:00"
+  sound: class-bell.wav
+  zone: indoors
+  label: First bell
+```
+
+Example snow day:
+
+```yaml
+no_bell_dates:
+  2027-01-15: Snow day
+```
+
+Times are always `America/Denver` wall-clock values. DST changes do not move the displayed or
+scheduled bell time.
+
+Events may also define a bounded pre-tone/repeat/priority policy:
+
+```yaml
+- time: "09:30"
+  sound: lockdown-message.wav
+  pre_tone: attention-chime.wav
+  zone: everywhere
+  label: Lockdown drill
+  repeat_count: 3
+  repeat_interval_seconds: 2
+  priority: 100
+  busy_policy: preempt
+```
+
+`max_repeats` in `settings.yaml` remains the final safety ceiling. Priority at or above
+`emergency_priority_threshold` always uses cooperative preemption; it cannot be accidentally
+configured to wait behind a routine page.
+
+## Delivery protocols
+
+A zone may reference any mix of these destination types:
+
+- `multicast`: Regular RTP or calibrated Poly Group Page, with per-destination TTL and isolated
+  socket failures. Multicast destinations sharing a wire format are paced from one frame buffer.
+- `sip`: outbound one-way paging using SIP over UDP, TCP, or certificate-verified TLS; SDP negotiates
+  PCMU RTP. Digest supports SHA-256/SHA-512-256 and legacy MD5 compatibility. All OS-resolved A-record
+  addresses are tried; configure an explicit proxy host/port because NAPTR/SRV discovery is not claimed.
+- `http`: retrying JSON webhooks for another paging gateway, strobe, display, or automation server.
+  Requests carry an idempotency key and optional HMAC-SHA256 signature.
+
+Secrets are referenced by environment-variable name in YAML and stored in `config/bell.env`, never
+inline in `destinations.yaml`. Disabled SIP and HTTP examples are included in the sample configuration.
+Required endpoint failure fails the page visibly; an optional endpoint is isolated and enters a short
+circuit-breaker cooldown after repeated failures.
+
+## Automation API
+
+The office service exposes JSON endpoints on the same port as the UI:
+
+- `GET /api/v1/health`
+- `GET /api/v1/today`
+- `POST /api/v1/trigger`
+
+Set separate `BELL_API_KEY` and `BELL_EMERGENCY_API_KEY` values. Every request uses
+`X-Bell-API-Key`; triggers also require a stable `Idempotency-Key`. Only the emergency key can use an
+emergency priority or override allowed hours. Requests are rate-limited and idempotency survives a
+restart in SQLite.
+
+```bash
+curl -X POST https://bell.example.edu:8080/api/v1/trigger \
+  -H 'Content-Type: application/json' \
+  -H 'X-Bell-API-Key: ...' \
+  -H 'Idempotency-Key: drill-2026-08-15-a' \
+  -d '{"sound":"class-bell.wav","zone":"indoors","label":"Office test"}'
+```
+
+Use a trusted certificate via `BELL_TLS_CERTFILE` and `BELL_TLS_KEYFILE` whenever API/password traffic
+can cross anything beyond a physically trusted management LAN. Security headers, strict session
+cookies under TLS, no-store responses, scoped keys, and HMAC outbound signatures are built in.
+
+## Phones and Algo
+
+Configure the T31P receivers for Poly/Yealink group paging channels 23, 24, and 25 at the
+shared multicast endpoint. Configure the Algo 8186 at `192.168.10.32` as **Poly Group Page**,
+Receiver mode, subscribed to Groups 1, 24, and 25. Regular RTP mode is not compatible.
+
+Provision these settings through the authoritative phone configuration when possible. Hosted
+phone providers commonly reprovision overnight and wipe changes made in the local web UI.
+After any reprovisioning, run the acceptance test and verify paging subscriptions again.
+
+## Production
+
+Review [operations](docs/OPERATIONS.md), calibrate the Poly format, then deploy with
+`deploy/install.sh`. You may pre-create `/opt/bell/config/bell.env` from `bell.env.example` with
+mode 0600. If it is absent, the installer creates strong UI/session secrets and prints the UI
+password once; store it in the school's password manager.
+The front-office UI binds on `0.0.0.0:8080`; firewall it to the trusted school LAN and never
+publish it to the internet. The health service stays on `127.0.0.1:8000`.
+
+Run the installer as root so it can install and enable the systemd unit; it performs Python
+package installation as the unprivileged `bell` account:
+
+```bash
+sudo bash deploy/install.sh
+```
+
+If an RTC is installed and verified, set `rtc_required: true` so acceptance checks enforce it.
+
+After install, run `python scripts/acceptance.py`. First live-test one channel-23 bell during a
+lunch period. Do not load the full production schedule until that controlled test is observed.
+
+The product comparison and standards rationale are documented in [docs/RESEARCH.md](docs/RESEARCH.md).

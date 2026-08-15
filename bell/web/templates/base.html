@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}School Bell{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+{% if authenticated %}
+<header><strong>School Bell</strong><nav><a href="/">Today</a><a href="/calendar">Calendar</a><a href="/manual">Ring Now</a><a href="/status">Status</a><form action="/logout" method="post"><button class="link">Sign out</button></form></nav></header>
+{% endif %}
+<main>{% block content %}{% endblock %}</main>
+</body>
+</html>

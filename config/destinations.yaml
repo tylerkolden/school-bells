@@ -1,0 +1,34 @@
+destinations:
+  - name: all
+    protocol: multicast
+    group: 239.255.255.255
+    port: 601
+    ttl: 1
+    enabled: true
+
+  # Optional standards-based SIP paging target. Secrets stay in bell.env.
+  - name: sip-paging-example
+    protocol: sip
+    port: 5061
+    sip_uri: sip:page@example.invalid
+    sip_host: pbx.example.invalid
+    sip_transport: tls
+    sip_username: bell-system
+    sip_password_env: BELL_SIP_PASSWORD
+    tls_server_name: pbx.example.invalid
+    timeout_seconds: 5
+    retries: 2
+    required: false
+    enabled: false
+
+  # Optional HTTPS automation target for strobes, displays, or a remote paging gateway.
+  - name: webhook-example
+    protocol: http
+    port: 443
+    webhook_url: https://paging.example.invalid/api/trigger
+    webhook_secret_env: BELL_WEBHOOK_SECRET
+    healthcheck_url: https://paging.example.invalid/health
+    timeout_seconds: 5
+    retries: 2
+    required: false
+    enabled: false

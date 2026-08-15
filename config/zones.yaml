@@ -1,0 +1,13 @@
+zones:
+  - name: indoors
+    channel: 23
+    destinations: [all]
+    description: Indoors — desk phones only; outdoor horn stays silent.
+  - name: outdoors
+    channel: 24
+    destinations: [all]
+    description: Outdoors — desk phones and the outdoor horn.
+  - name: everywhere
+    channel: 25
+    destinations: [all]
+    description: Everywhere — every desk phone and the outdoor horn.

@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bell-system"
+version = "0.1.0"
+description = "Fail-safe scheduled multicast school bell transmitter"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "APScheduler>=3.10,<4",
+  "fastapi>=0.115",
+  "itsdangerous>=2.2",
+  "jinja2>=3.1",
+  "pydantic>=2.8",
+  "python-multipart>=0.0.12",
+  "PyYAML>=6.0",
+  "ruamel.yaml>=0.18",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["build>=1.2", "httpx2>=2.10", "pytest>=8", "pytest-cov>=5", "ruff>=0.6"]
+
+[project.scripts]
+bell-service = "bell.service:main"
+bell-web = "bell.web:main"
+
+[tool.setuptools]
+packages = ["bell", "bell.protocols", "bell.wire", "bell.web"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+"bell.web" = ["templates/*.html", "static/*.css"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]

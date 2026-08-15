@@ -1,0 +1,21 @@
+settings:
+  timezone: America/Denver
+  # Set this to the Raspberry Pi's wired phone-VLAN address before deployment.
+  interface_ip: 192.168.10.20
+  wire_format: poly_group_page
+  # Change to true after installing and verifying a DS3231 (or similar) RTC.
+  rtc_required: false
+  endpoint_check_interval_seconds: 60
+  api_rate_limit_per_minute: 10
+  sounds_dir: sounds
+  state_dir: state
+  log_dir: logs
+
+safety:
+  allowed_hours_start: "06:30"
+  allowed_hours_end: "17:30"
+  max_events_per_day: 40
+  max_repeats: 4
+  emergency_priority_threshold: 90
+  kill_switch_enabled: false
+  kill_switch_until:

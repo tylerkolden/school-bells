@@ -1,0 +1,2 @@
+{% extends "base.html" %}{% block title %}Sign in — School Bell{% endblock %}
+{% block content %}<section class="card narrow"><h1>School Bell</h1><p>Front-office access</p>{% if failed %}<div class="banner danger">Incorrect password.</div>{% endif %}<form method="post"><label>Password<input autofocus name="submitted_password" type="password" required></label><button>Sign in</button></form></section>{% endblock %}
