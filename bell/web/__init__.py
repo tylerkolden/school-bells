@@ -82,11 +82,6 @@ class RateLimiter:
             return True
 
 
-def _safe_log_text(value: str, limit: int = 255) -> str:
-    """Keep untrusted structured-log fields single-line and bounded."""
-    return value.replace("\r", "\\r").replace("\n", "\\n")[:limit]
-
-
 def create_app(
     config_dir: Path | str = Path("config"),
     *,
@@ -703,10 +698,6 @@ def create_app(
             "ui_action" if emergency else "api_action",
             extra={
                 "action": "api_trigger",
-                "target": {
-                    "zone": _safe_log_text(trigger.zone, 100),
-                    "sound": _safe_log_text(trigger.sound),
-                },
                 "priority": trigger.priority,
                 "result": status,
             },
