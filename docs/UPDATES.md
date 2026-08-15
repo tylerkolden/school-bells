@@ -1,5 +1,22 @@
 # Secure web OTA updates
 
+## First installation
+
+On a fresh 64-bit Raspberry Pi OS host, use the one-paste installer from the latest immutable
+production release:
+
+```bash
+sudo apt-get update && sudo apt-get install --yes curl && curl -fL https://github.com/tylerkolden/school-bells/releases/latest/download/install-school-bells.sh -o /tmp/install-school-bells.sh && sudo bash /tmp/install-school-bells.sh
+```
+
+This is the only terminal bootstrap. It requires `aarch64`, installs the OS prerequisites, accepts
+only a stable immutable release published by the approved GitHub Actions identity, checks the exact
+asset name, size, publisher, redirect host, and SHA-256 digest, safely extracts regular files only,
+initializes a new configuration with the Pi's active IPv4 address, and passes the release provenance
+fields to the root installer. Set `BELL_INTERFACE_IP` on the bootstrap command when the Pi has more
+than one interface and automatic route selection would not choose the phone VLAN. Existing site
+configuration is never replaced. All later production updates use the authenticated web console.
+
 The operator computer does not need internet access. It opens the console over the school LAN;
 the Raspberry Pi makes outbound HTTPS requests to GitHub when an administrator clicks **Check for
 updates** or confirms an install.

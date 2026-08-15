@@ -59,6 +59,7 @@ id bell >/dev/null 2>&1 || useradd --system --create-home --home-dir "$APP_DIR" 
 install -d -m 0755 -o root -g root "$APP_DIR" "$SHARED_DIR" "$RELEASES_DIR"
 install -d -m 0700 -o root -g root "$BACKUP_DIR" "$UPDATER_DIR"
 install -d -m 0755 -o root -g root "$UPDATER_LIB"
+fresh_config=0
 
 # Preserve a consistent copy of site-owned data before changing layout or code.
 PYTHONPATH="$SOURCE_DIR" python3 -m bell.backup --app-dir "$APP_DIR" --backup-dir "$BACKUP_DIR"
@@ -74,6 +75,7 @@ migrate_shared_directory() {
     elif [[ "$name" == "config" ]]; then
       install -d -m "$mode" -o bell -g bell "$shared"
       cp -a "$SOURCE_DIR/config/." "$shared/"
+      fresh_config=1
     elif [[ "$name" == "sounds" ]]; then
       cp -a "$SOURCE_DIR/sounds" "$shared"
     else
@@ -97,6 +99,42 @@ migrate_shared_directory sounds 0750
 migrate_shared_directory state 0750
 migrate_shared_directory logs 0750
 install -d -m 0750 -o bell -g bell "$APP_DIR/state/update"
+
+interface_override="${BELL_INTERFACE_IP:-}"
+if [[ "$fresh_config" -eq 1 && -n "$interface_override" ]]; then
+  python3 - "$APP_DIR/config/settings.yaml" "$interface_override" <<'PY_INTERFACE'
+import ipaddress
+import os
+import pathlib
+import re
+import sys
+import tempfile
+
+path = pathlib.Path(sys.argv[1])
+address = ipaddress.ip_address(sys.argv[2])
+if address.version != 4 or address.is_loopback or address.is_multicast or address.is_unspecified:
+    raise SystemExit("BELL_INTERFACE_IP must be a usable unicast IPv4 address")
+text = path.read_text(encoding="utf-8")
+updated, count = re.subn(
+    r"(?m)^(\s*interface_ip:\s*).+$",
+    lambda match: match.group(1) + str(address),
+    text,
+)
+if count != 1:
+    raise SystemExit("settings.yaml must contain exactly one interface_ip setting")
+descriptor, temporary = tempfile.mkstemp(prefix=".settings-", suffix=".yaml", dir=path.parent)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        output.write(updated)
+        output.flush()
+        os.fsync(output.fileno())
+    os.chmod(temporary, 0o640)
+    os.replace(temporary, path)
+finally:
+    pathlib.Path(temporary).unlink(missing_ok=True)
+PY_INTERFACE
+  chown bell:bell "$APP_DIR/config/settings.yaml"
+fi
 
 generated_ui_password=""
 if [[ ! -f "$APP_DIR/config/bell.env" ]]; then

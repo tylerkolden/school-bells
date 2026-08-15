@@ -87,10 +87,11 @@ jobs:
           tar --sort=name --owner=0 --group=0 --numeric-owner \
             -czf "dist/release/bell-system-${RELEASE_TAG}.tar.gz" \
             -C package bell config deploy docs scripts sounds wheelhouse pyproject.toml README.md RELEASE.json
+          install -m 0755 deploy/bootstrap.sh dist/release/install-school-bells.sh
       - name: Attest production package provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-path: dist/release/bell-system-*.tar.gz
+          subject-path: dist/release/*
       - name: Publish release with all assets attached
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,5 +99,6 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" \
             "dist/release/bell-system-${RELEASE_TAG}.tar.gz" \
+            "dist/release/install-school-bells.sh" \
             --draft --verify-tag --generate-notes --title "School Bell ${RELEASE_TAG}"
           gh release edit "$RELEASE_TAG" --draft=false --latest

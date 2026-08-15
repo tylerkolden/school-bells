@@ -52,6 +52,10 @@ def test_update_unit_has_fixed_privilege_boundary() -> None:
 
 def test_installer_stages_before_atomic_activation_and_supports_offline_wheels() -> None:
     installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    embedded_interface = installer.split("<<'PY_INTERFACE'\n", maxsplit=1)[1].split(
+        "\nPY_INTERFACE", maxsplit=1
+    )[0]
+    compile(embedded_interface, "deploy/install.sh:PY_INTERFACE", "exec")
     preflight = installer.index("--check-only --config-dir")
     activation = installer.index('mv -Tf -- "$new_link" "$APP_DIR/current"')
     restart = installer.index("systemctl restart bell-system.service")
@@ -60,5 +64,7 @@ def test_installer_stages_before_atomic_activation_and_supports_offline_wheels()
     assert "cp311|cp312|cp313" in installer
     assert 'wheelhouse/$runtime_abi' in installer
     assert "requires 64-bit ARM" in installer
+    assert '[[ "$fresh_config" -eq 1 && -n "$interface_override" ]]' in installer
+    assert "settings.yaml must contain exactly one interface_ip setting" in installer
     unit = (ROOT / "deploy" / "bell-system.service").read_text(encoding="utf-8")
     assert "WorkingDirectory=/opt/bell/current" in unit

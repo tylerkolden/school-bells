@@ -191,8 +191,22 @@ After any reprovisioning, run the acceptance test and verify paging subscription
 
 ## Production
 
-Review [operations](docs/OPERATIONS.md), calibrate the Poly format, then deploy with
-`deploy/install.sh`. You may pre-create `/opt/bell/config/bell.env` from `bell.env.example` with
+Review [operations](docs/OPERATIONS.md), deploy to a fresh 64-bit Raspberry Pi OS host with one
+paste, and then complete Poly calibration and hardware acceptance before enabling schedules:
+
+```bash
+sudo apt-get update && sudo apt-get install --yes curl && curl -fL https://github.com/tylerkolden/school-bells/releases/latest/download/install-school-bells.sh -o /tmp/install-school-bells.sh && sudo bash /tmp/install-school-bells.sh
+```
+
+The public release needs no GitHub account or token. The downloaded bootstrap installs OS
+prerequisites, verifies the latest immutable production package and its GitHub SHA-256 digest, and
+then initializes a fresh configuration with the Pi's active IPv4 address and runs
+`deploy/install.sh`. On a multi-NIC Pi, run the final command as
+`sudo BELL_INTERFACE_IP=192.168.x.x bash /tmp/install-school-bells.sh` to select the phone VLAN.
+Do not replace this with `curl | sudo bash`; keeping download and
+execution separate makes failures visible and leaves a script that can be inspected first.
+
+You may pre-create `/opt/bell/config/bell.env` from `bell.env.example` with
 mode 0600. If it is absent, the installer creates strong UI/session secrets and prints the UI
 password once; store it in the school's password manager.
 The front-office UI binds on `0.0.0.0:8080`; firewall it to the trusted school LAN and never
