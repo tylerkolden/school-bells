@@ -155,7 +155,7 @@ Clear events</button></p></form></section></main></body></html>""".encode()
             "payload": payload,
         }
         self.server.store.add(event)
-        LOGGER.info("simulated_page_received", extra={"event": payload})
+        LOGGER.info("simulated_page_received")
         self._json(HTTPStatus.ACCEPTED, {"accepted": True})
 
     def log_message(self, format: str, *args: object) -> None:
