@@ -166,7 +166,9 @@ class ServiceRuntime:
         self.scheduler.config = refreshed
         self.delivery.update_config(refreshed)
         self.monitor.update_config(refreshed)
-        self.scheduler.register_day(datetime.now(self.scheduler.timezone).date())
+        self.scheduler.register_day(
+            datetime.now(self.scheduler.timezone).date(), include_recent_misfires=False
+        )
         LOGGER.info("configuration_reloaded", extra={"config_hash": refreshed.hash})
 
     def health_data(self) -> dict[str, Any]:

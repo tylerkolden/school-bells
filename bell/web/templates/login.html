@@ -1,2 +1,7 @@
 {% extends "base.html" %}{% block title %}Sign in — School Bell{% endblock %}
-{% block content %}<section class="card narrow"><h1>School Bell</h1><p>Front-office access</p>{% if failed %}<div class="banner danger">Incorrect password.</div>{% endif %}<form method="post"><label>Password<input autofocus name="submitted_password" type="password" required></label><button>Sign in</button></form></section>{% endblock %}
+{% block content %}
+<section class="auth-shell">
+  <div class="auth-intro"><span class="eyebrow">School operations</span><h1>Every bell, on time.</h1><p>Secure access for authorized office staff.</p></div>
+  <form method="post" class="card auth-card"><input type="hidden" name="csrf" value="{{ csrf_token }}"><h2>Sign in</h2>{% if failed %}<div class="notice danger" role="alert"><strong>Sign-in failed.</strong> Check the password and try again.</div>{% endif %}<label for="password">Password</label><input id="password" autofocus name="submitted_password" type="password" autocomplete="current-password" required><button class="primary full-width">Continue</button></form>
+</section>
+{% endblock %}

@@ -88,9 +88,16 @@ class FireState:
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS api_requests (
                 idempotency_key TEXT PRIMARY KEY, created_at TEXT NOT NULL,
-                status TEXT NOT NULL, detail TEXT NOT NULL
+                status TEXT NOT NULL, detail TEXT NOT NULL, request_hash TEXT NOT NULL DEFAULT ''
                 )"""
             )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(api_requests)").fetchall()
+            }
+            if "request_hash" not in columns:
+                connection.execute(
+                    "ALTER TABLE api_requests ADD COLUMN request_hash TEXT NOT NULL DEFAULT ''"
+                )
             connection.execute(
                 "DELETE FROM api_requests WHERE julianday(created_at) < julianday('now', '-30 days')"
             )
@@ -142,18 +149,37 @@ class FireState:
     def api_result(self, idempotency_key: str) -> dict[str, str] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT created_at,status,detail FROM api_requests WHERE idempotency_key=?",
+                "SELECT created_at,status,detail,request_hash FROM api_requests WHERE idempotency_key=?",
                 (idempotency_key,),
             ).fetchone()
         if row is None:
             return None
-        return {"created_at": row[0], "status": row[1], "detail": row[2]}
+        return {
+            "created_at": row[0],
+            "status": row[1],
+            "detail": row[2],
+            "request_hash": row[3],
+        }
 
-    def claim_api_request(self, idempotency_key: str, now: datetime) -> bool:
+    def claim_api_request(self, idempotency_key: str, now: datetime, request_hash: str = "") -> bool:
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO api_requests VALUES (?, ?, ?, ?)",
-                (idempotency_key, now.isoformat(), "processing", "request claimed"),
+                """INSERT OR IGNORE INTO api_requests
+                (idempotency_key,created_at,status,detail,request_hash) VALUES (?, ?, ?, ?, ?)""",
+                (idempotency_key, now.isoformat(), "processing", "request claimed", request_hash),
+            )
+        return cursor.rowcount == 1
+
+    def expire_stale_api_request(
+        self, idempotency_key: str, now: datetime, max_age_seconds: int = 300
+    ) -> bool:
+        cutoff = (now - timedelta(seconds=max_age_seconds)).isoformat()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE api_requests SET status='indeterminate',
+                detail='request was interrupted; use a new key after verifying receivers'
+                WHERE idempotency_key=? AND status='processing' AND created_at<?""",
+                (idempotency_key, cutoff),
             )
         return cursor.rowcount == 1
 
@@ -187,14 +213,19 @@ class BellScheduler:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=wait)
 
-    def register_day(self, day: date | None = None) -> DayPlan:
+    def register_day(
+        self, day: date | None = None, *, include_recent_misfires: bool = True
+    ) -> DayPlan:
         actual_day = day or datetime.now(self.timezone).date()
+        current = datetime.now(self.timezone)
         plan = resolve_day(actual_day, self.config)
         prefix = f"bell-{actual_day.isoformat()}-"
         for job in self.scheduler.get_jobs():
             if job.id.startswith(prefix):
                 self.scheduler.remove_job(job.id)
         for index, planned in enumerate(plan.events):
+            if not include_recent_misfires and planned.scheduled_at <= current:
+                continue
             self.scheduler.add_job(
                 self.fire,
                 DateTrigger(run_date=planned.scheduled_at),
