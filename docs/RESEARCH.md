@@ -30,7 +30,7 @@ school paging systems and make the first real deployment easier to validate and 
    per-event priority, and explicit busy policy. Configuration writes are atomic, validated, backed
    up, and automatically rolled back on validation failure.
 2. **Multi-protocol delivery.** One zone can target synchronized regular RTP, fail-closed Poly Group
-   Page, SIP paging over UDP/TCP/TLS with SDP and PCMU RTP, and signed HTTP(S) webhooks for remote
+   Page, SIP paging over UDP/TCP/TLS with SDP-negotiated PCMU/PCMA/G.722 RTP, and signed HTTP(S) webhooks for remote
    gateways, strobes, or displays. Required and optional endpoints have distinct failure semantics.
 3. **Emergency priority and concurrency control.** Only one page owns the audio path at a time.
    Routine work may skip or queue; emergency-priority work cooperatively cancels and preempts lower
@@ -53,7 +53,9 @@ school paging systems and make the first real deployment easier to validate and 
 - [RFC 8760](https://www.rfc-editor.org/rfc/rfc8760.html) updates SIP Digest with SHA-256 and
   SHA-512/256. Both are supported; MD5 remains available only for legacy PBX interoperability.
 - [RFC 3550](https://www.rfc-editor.org/info/rfc3550/) defines RTP sequence numbers, timestamps,
-  SSRCs, and RTCP. Paging media uses random stream state, 20 ms cumulative pacing, and PCMU PT 0.
+  SSRCs, and RTCP. [RFC 3551](https://www.rfc-editor.org/rfc/rfc3551.html) assigns the static
+  PCMU (0), PCMA (8), and G.722 (9) payload types and the special 8 kHz G.722 RTP clock. Paging media
+  uses random stream state and 20 ms cumulative pacing.
 
 ## Deliberate limits
 
@@ -61,3 +63,5 @@ This is a one-way scheduled paging controller, not a general-purpose PBX, E911 s
 control panel, or certified life-safety system. SIP supports outbound paging and OPTIONS monitoring,
 not inbound phone registration or two-way intercom. The proprietary Poly extension remains blocked
 until the school's real packet capture is available. No protocol adapter may weaken that guard.
+SRTP, NAPTR/SRV discovery, strict-route SIP proxies, and vendor-specific codecs are not claimed;
+unsupported secure-media SDP is rejected without a cleartext downgrade.

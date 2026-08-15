@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
-from bell.audio import load_frames
+from bell.audio import CodecName, codec_spec, load_frames, transcode
 from bell.config import BellConfig, BellEvent, Destination, Zone
 from bell.monitor import EndpointRegistry
 from bell.protocols.base import DeliveryOutcome
@@ -17,6 +17,7 @@ from bell.protocols.http import WebhookClient
 from bell.protocols.sip import SIPClient
 from bell.transmit import DestinationEndpoint, Transmitter
 from bell.wire import get_wire_format
+from bell.wire.plain_rtp import PlainRTP
 
 
 class PageDeliveryError(RuntimeError):
@@ -77,35 +78,45 @@ class DeliveryManager:
                         0.0,
                     )
                 )
-        multicast_groups: dict[str, list[Destination]] = {}
+        source_audio = self.config.sounds_path / (sound_name or event.sound)
+
+        def media_for(codec: CodecName) -> Path:
+            return raw_audio if codec == "pcmu" else transcode(source_audio, codec)
+
+        multicast_groups: dict[tuple[str, CodecName], list[Destination]] = {}
         others: list[Destination] = []
         for destination in ready:
             if destination.protocol == "multicast":
                 wire_name = destination.wire_format or self.config.settings.wire_format
-                multicast_groups.setdefault(wire_name, []).append(destination)
+                codec = destination.codecs[0]
+                multicast_groups.setdefault((wire_name, codec), []).append(destination)
             else:
                 others.append(destination)
         task_count = len(multicast_groups) + len(others)
         if task_count:
             with ThreadPoolExecutor(max_workers=min(8, task_count), thread_name_prefix="delivery") as pool:
                 futures = []
-                for wire_name, group in multicast_groups.items():
+                for (wire_name, codec), group in multicast_groups.items():
                     futures.append(
                         pool.submit(
                             self._multicast,
                             wire_name,
+                            codec,
                             group,
-                            raw_audio,
+                            media_for(codec),
                             zone.channel,
                             cancel_event,
                         )
                     )
                 for destination in others:
                     if destination.protocol == "sip":
+                        sip_media = {
+                            codec: media_for(codec) for codec in destination.codecs
+                        }
                         futures.append(
                             pool.submit(
                                 SIPClient(destination, self.config.settings.interface_ip).page,
-                                raw_audio,
+                                sip_media,
                                 cancel_event,
                             )
                         )
@@ -153,6 +164,7 @@ class DeliveryManager:
     def _multicast(
         self,
         wire_name: str,
+        codec: CodecName,
         destinations: list[Destination],
         raw_audio: Path,
         zone_channel: int,
@@ -164,13 +176,24 @@ class DeliveryManager:
             for item in destinations
         ]
         channel = 0 if wire_name == "plain_rtp" else zone_channel
+        spec = codec_spec(codec)
+        wire = (
+            PlainRTP(spec.payload_type)
+            if wire_name == "plain_rtp"
+            else get_wire_format(wire_name)
+        )
         try:
             with Transmitter(
-                get_wire_format(wire_name),
+                wire,
                 endpoints,
                 self.config.settings.interface_ip,
+                timestamp_step=spec.rtp_clock_rate // 50,
             ) as transmitter:
-                result = transmitter.send(load_frames(raw_audio), channel, cancel_event)
+                result = transmitter.send(
+                    load_frames(raw_audio, spec.frame_bytes, spec.padding_byte),
+                    channel,
+                    cancel_event,
+                )
             return [
                 DeliveryOutcome(
                     item.name,
@@ -184,7 +207,10 @@ class DeliveryManager:
                     (
                         result.destination_errors[item.name]
                         if item.name in result.destination_errors
-                        else f"{result.packet_count} packets, {result.destination_bytes[item.name]} bytes"
+                        else (
+                            f"{result.packet_count} {codec.upper()} packets, "
+                            f"{result.destination_bytes[item.name]} bytes"
+                        )
                     ),
                     1,
                     time.monotonic() - started,

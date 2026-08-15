@@ -16,12 +16,12 @@ import socket
 import ssl
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bell.audio import load_frames
+from bell.audio import CodecName, codec_spec, load_frames
 from bell.config import Destination
 from bell.protocols.base import DeliveryOutcome
 from bell.wire.base import StreamState
@@ -48,6 +48,8 @@ class SDPAnswer:
     address: str
     port: int
     payload_types: tuple[int, ...]
+    codec: CodecName
+    payload_type: int
 
 
 def parse_sip_response(data: bytes, peer: tuple[str, int] | None = None) -> SIPResponse:
@@ -141,8 +143,9 @@ def build_digest_authorization(
     cnonce: str | None = None,
 ) -> str:
     algorithm = challenge.get("algorithm", "MD5")
-    qop_options = {item.strip().lower() for item in challenge.get("qop", "auth").split(",")}
-    if "auth" not in qop_options:
+    qop_value = challenge.get("qop")
+    qop_options = {item.strip().lower() for item in qop_value.split(",")} if qop_value else set()
+    if qop_options and "auth" not in qop_options:
         raise SIPError("SIP Digest challenge does not offer qop=auth")
     cnonce = cnonce or secrets.token_hex(12)
     nc = f"{nonce_count:08x}"
@@ -152,7 +155,11 @@ def build_digest_authorization(
     ha2 = _hash(algorithm, f"{method}:{uri}")
     response = _hash(
         algorithm,
-        f"{ha1}:{challenge['nonce']}:{nc}:{cnonce}:auth:{ha2}",
+        (
+            f"{ha1}:{challenge['nonce']}:{nc}:{cnonce}:auth:{ha2}"
+            if qop_options
+            else f"{ha1}:{challenge['nonce']}:{ha2}"
+        ),
     )
     fields = [
         f'username="{username}"',
@@ -161,29 +168,41 @@ def build_digest_authorization(
         f'uri="{uri}"',
         f"response=\"{response}\"",
         f"algorithm={algorithm}",
-        "qop=auth",
-        f"nc={nc}",
-        f'cnonce="{cnonce}"',
     ]
+    if qop_options:
+        fields.extend(["qop=auth", f"nc={nc}", f'cnonce="{cnonce}"'])
+    elif algorithm.upper().endswith("-SESS"):
+        fields.append(f'cnonce="{cnonce}"')
     if opaque := challenge.get("opaque"):
         fields.append(f'opaque="{opaque}"')
     return "Digest " + ", ".join(fields)
 
 
-def parse_sdp(body: bytes) -> SDPAnswer:
+def parse_sdp(body: bytes, offered_codecs: Iterable[CodecName] = ("pcmu",)) -> SDPAnswer:
     address: str | None = None
     media_address: str | None = None
     port: int | None = None
     payload_types: tuple[int, ...] = ()
+    rtpmap: dict[int, str] = {}
+    inactive = False
     in_audio = False
+    audio_seen = False
     for line in body.decode("utf-8", "replace").replace("\r", "").split("\n"):
         if line.startswith("m=audio "):
+            if audio_seen:
+                in_audio = False
+                continue
             parts = line.split()
             if len(parts) < 4:
                 raise SIPError("malformed SDP audio media line")
+            if parts[2].upper() != "RTP/AVP":
+                raise SIPError(f"unsupported SDP audio profile {parts[2]!r}; SRTP is not configured")
             port = int(parts[1])
+            if not 1 <= port <= 65535:
+                raise SIPError("SDP answer has an invalid audio port")
             payload_types = tuple(int(item) for item in parts[3:] if item.isdigit())
             in_audio = True
+            audio_seen = True
         elif line.startswith("m="):
             in_audio = False
         elif line.startswith("c=IN IP4 "):
@@ -192,27 +211,51 @@ def parse_sdp(body: bytes) -> SDPAnswer:
                 media_address = candidate
             elif address is None:
                 address = candidate
+        elif in_audio and line.lower() == "a=inactive":
+            inactive = True
+        elif in_audio and line.lower().startswith("a=rtpmap:"):
+            match = re.match(r"a=rtpmap:(\d+)\s+([^/\s]+)", line, re.IGNORECASE)
+            if match:
+                rtpmap[int(match.group(1))] = match.group(2).lower()
     selected_address = media_address or address
     if not selected_address or not port:
         raise SIPError("SDP answer has no usable IPv4 audio destination")
-    if 0 not in payload_types:
-        raise SIPError("SIP peer did not accept PCMU payload type 0")
-    return SDPAnswer(selected_address, port, payload_types)
+    if inactive:
+        raise SIPError("SIP peer marked the audio stream inactive")
+    encoding_names = {"pcmu": "pcmu", "pcma": "pcma", "g722": "g722"}
+    for codec in offered_codecs:
+        spec = codec_spec(codec)
+        mapped = rtpmap.get(spec.payload_type)
+        if spec.payload_type in payload_types and (mapped is None or mapped == encoding_names[codec]):
+            return SDPAnswer(selected_address, port, payload_types, codec, spec.payload_type)
+    offered = ", ".join(offered_codecs)
+    raise SIPError(f"SIP peer did not accept an offered audio codec ({offered})")
 
 
-def build_sdp(local_ip: str, media_port: int) -> bytes:
+def build_sdp(
+    local_ip: str, media_port: int, codecs: Iterable[CodecName] = ("pcmu",)
+) -> bytes:
     session_id = secrets.randbelow(10**12)
-    lines = (
+    selected = tuple(codecs)
+    if not selected:
+        raise SIPError("at least one SIP audio codec must be offered")
+    payloads = " ".join(str(codec_spec(codec).payload_type) for codec in selected)
+    lines = [
         "v=0",
         f"o=bell {session_id} {session_id} IN IP4 {local_ip}",
         "s=School Bell Page",
         f"c=IN IP4 {local_ip}",
         "t=0 0",
-        f"m=audio {media_port} RTP/AVP 0",
-        "a=rtpmap:0 PCMU/8000",
+        f"m=audio {media_port} RTP/AVP {payloads}",
+    ]
+    lines.extend(
+        f"a=rtpmap:{codec_spec(codec).payload_type} {codec.upper()}/{codec_spec(codec).rtp_clock_rate}"
+        for codec in selected
+    )
+    lines.extend([
         "a=sendonly",
         "a=ptime:20",
-    )
+    ])
     return ("\r\n".join(lines) + "\r\n").encode()
 
 
@@ -455,7 +498,11 @@ class SIPClient:
                 time.monotonic() - started,
             )
 
-    def page(self, raw_audio: Path, cancel_event: threading.Event | None = None) -> DeliveryOutcome:
+    def page(
+        self,
+        raw_audio: Path | Mapping[str, Path],
+        cancel_event: threading.Event | None = None,
+    ) -> DeliveryOutcome:
         started = time.monotonic()
         media_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         media_socket.bind((self.local_ip, 0))
@@ -465,7 +512,11 @@ class SIPClient:
         branch = secrets.token_hex(8)
         cseq = 1
         uri = self.destination.sip_uri or ""
-        body = build_sdp(self.local_ip, media_socket.getsockname()[1])
+        media_by_codec = {"pcmu": raw_audio} if isinstance(raw_audio, Path) else raw_audio
+        offered_codecs = tuple(
+            codec for codec in self.destination.codecs if codec in media_by_codec
+        )
+        body = build_sdp(self.local_ip, media_socket.getsockname()[1], offered_codecs)
         headers = self._base_headers("INVITE", call_id, cseq, from_tag, branch)
         headers["Content-Type"] = "application/sdp"
         attempts = 1
@@ -504,7 +555,7 @@ class SIPClient:
                 attempts += 1
             if not 200 <= response.status < 300:
                 raise SIPError(f"INVITE failed with {response.status} {response.reason}")
-            answer = parse_sdp(response.body)
+            answer = parse_sdp(response.body, offered_codecs)
             self.transport.send(self._ack(response, uri, headers, call_id, cseq, from_tag))
             media_error: OSError | None = None
             packet_count = 0
@@ -512,9 +563,15 @@ class SIPClient:
             try:
                 packet_count, cancelled = self._stream_media(
                     media_socket,
-                    load_frames(raw_audio),
+                    load_frames(
+                        media_by_codec[answer.codec],
+                        codec_spec(answer.codec).frame_bytes,
+                        codec_spec(answer.codec).padding_byte,
+                    ),
                     (answer.address, answer.port),
                     cancel_event,
+                    answer.codec,
+                    answer.payload_type,
                 )
             except OSError as exc:
                 media_error = exc
@@ -547,7 +604,7 @@ class SIPClient:
                 "sip",
                 not cancelled,
                 "cancelled" if cancelled else "200",
-                f"streamed {packet_count} PCMU packets",
+                f"streamed {packet_count} {answer.codec.upper()} packets",
                 attempts,
                 time.monotonic() - started,
             )
@@ -606,6 +663,8 @@ class SIPClient:
     ) -> dict[str, str]:
         headers = self._base_headers(method, call_id, cseq, from_tag, branch)
         headers["To"] = response.headers.get("to", headers["To"])
+        if route_set := _route_set(response.headers.get("record-route")):
+            headers["Route"] = ", ".join(route_set)
         return headers
 
     @staticmethod
@@ -614,9 +673,12 @@ class SIPClient:
         frames: Iterable[bytes],
         address: tuple[str, int],
         cancel_event: threading.Event | None,
+        codec: CodecName = "pcmu",
+        payload_type: int | None = None,
     ) -> tuple[int, bool]:
-        state = StreamState()
-        wire = PlainRTP()
+        spec = codec_spec(codec)
+        state = StreamState(timestamp_step=spec.rtp_clock_rate // 50)
+        wire = PlainRTP(spec.payload_type if payload_type is None else payload_type)
         start = time.monotonic()
         count = 0
         for index, frame in enumerate(frames):
@@ -639,3 +701,10 @@ def _contact_uri(value: str | None) -> str | None:
         return None
     match = re.search(r"<?(sips?:[^>;\s]+)", value, re.IGNORECASE)
     return match.group(1) if match else None
+
+
+def _route_set(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    routes = [item.strip() for line in value.splitlines() for item in line.split(",") if item.strip()]
+    return tuple(reversed(routes))

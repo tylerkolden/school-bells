@@ -5,9 +5,12 @@ import socket
 import threading
 from pathlib import Path
 
+import pytest
+
 from bell.config import Destination
 from bell.protocols.sip import (
     SIPClient,
+    SIPError,
     SIPResponse,
     SIPTransport,
     build_digest_authorization,
@@ -55,6 +58,21 @@ def test_sip_response_request_and_sdp_parsing() -> None:
     assert compact.headers["to"].endswith("tag=1")
 
 
+def test_sdp_negotiates_preferred_common_codec() -> None:
+    offer = build_sdp("127.0.0.1", 12345, ("g722", "pcmu", "pcma"))
+    assert b"m=audio 12345 RTP/AVP 9 0 8" in offer
+    assert b"a=rtpmap:9 G722/8000" in offer
+    answer = parse_sdp(
+        b"v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 8 0\r\n",
+        ("g722", "pcma", "pcmu"),
+    )
+    assert answer.codec == "pcma" and answer.payload_type == 8
+    with pytest.raises(SIPError, match="SRTP is not configured"):
+        parse_sdp(
+            b"v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/SAVP 0\r\n"
+        )
+
+
 def test_sha256_digest_matches_hand_computation() -> None:
     challenge = parse_digest_challenge(
         'Digest realm="school", nonce="abc", algorithm=SHA-256, qop="auth", opaque="xyz"'
@@ -81,6 +99,18 @@ def test_sha256_digest_matches_hand_computation() -> None:
     assert selected["nonce"] == "modern"
 
 
+def test_legacy_digest_without_qop_is_supported() -> None:
+    challenge = parse_digest_challenge('Digest realm="school", nonce="abc", algorithm=MD5')
+    authorization = build_digest_authorization(
+        challenge, "bell", "secret", "OPTIONS", "sip:page@example.test"
+    )
+    ha1 = hashlib.md5(b"bell:school:secret").hexdigest()
+    ha2 = hashlib.md5(b"OPTIONS:sip:page@example.test").hexdigest()
+    expected = hashlib.md5(f"{ha1}:abc:{ha2}".encode()).hexdigest()
+    assert f'response="{expected}"' in authorization
+    assert "qop=" not in authorization and "cnonce=" not in authorization
+
+
 class FakeTransport:
     def __init__(self, media_port: int) -> None:
         self.media_port = media_port
@@ -96,7 +126,11 @@ class FakeTransport:
             return SIPResponse(
                 200,
                 "OK",
-                {"to": "<sip:page@example.test>;tag=remote", "contact": "<sip:page@127.0.0.1>"},
+                {
+                    "to": "<sip:page@example.test>;tag=remote",
+                    "contact": "<sip:page@127.0.0.1>",
+                    "record-route": "<sip:first.example;lr>\n<sip:second.example;lr>",
+                },
                 sdp,
             )
         return SIPResponse(200, "OK", {}, b"")
@@ -127,6 +161,7 @@ def test_sip_client_streams_pcmu_and_closes_dialog(tmp_path: Path) -> None:
     assert transport.requests[0].startswith(b"INVITE ")
     assert transport.sent[0].startswith(b"ACK ")
     assert transport.requests[-1].startswith(b"BYE ")
+    assert b"Route: <sip:second.example;lr>, <sip:first.example;lr>" in transport.requests[-1]
     assert packets[0][12:] == b"a" * 160
 
 

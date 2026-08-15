@@ -19,7 +19,10 @@ All zones use `239.255.255.255:601`; the Poly channel is the zone selector.
 | 24 | Outdoors | yes | yes | recess and dismissal |
 | 25 | Everywhere | yes | yes | emergency and all-call |
 
-Audio is PCMU (G.711 mu-law), 8 kHz mono, RTP payload type 0, in 20 ms/160-byte frames.
+The Poly/Yealink multicast path defaults to PCMU (G.711 μ-law), 8 kHz mono, RTP payload type 0,
+in 20 ms/160-byte frames. Standards-based SIP and Regular RTP destinations can instead select an
+ordered `codecs` list containing PCMU, PCMA (G.711 A-law), and G.722 wideband. Poly Group Page is
+deliberately restricted to PCMU for receiver compatibility.
 
 ## Architecture
 
@@ -125,7 +128,8 @@ A zone may reference any mix of these destination types:
 - `multicast`: Regular RTP or calibrated Poly Group Page, with per-destination TTL and isolated
   socket failures. Multicast destinations sharing a wire format are paced from one frame buffer.
 - `sip`: outbound one-way paging using SIP over UDP, TCP, or certificate-verified TLS; SDP negotiates
-  PCMU RTP. Digest supports SHA-256/SHA-512-256 and legacy MD5 compatibility. All OS-resolved A-record
+  the configured PCMU/PCMA/G.722 preference. Digest supports SHA-256/SHA-512-256, qop and legacy
+  no-qop/MD5 compatibility. Loose-route proxy dialog sets are honored. All OS-resolved A-record
   addresses are tried; configure an explicit proxy host/port because NAPTR/SRV discovery is not claimed.
 - `http`: retrying JSON webhooks for another paging gateway, strobe, display, or automation server.
   Requests carry an idempotency key and optional HMAC-SHA256 signature.
@@ -134,6 +138,11 @@ Secrets are referenced by environment-variable name in YAML and stored in `confi
 inline in `destinations.yaml`. Disabled SIP and HTTP examples are included in the sample configuration.
 Required endpoint failure fails the page visibly; an optional endpoint is isolated and enters a short
 circuit-breaker cooldown after repeated failures.
+
+Source recordings may use any format decoded by the installed FFmpeg build; WAV, MP3, AAC/M4A,
+FLAC, Ogg Vorbis, and Opus-in-Ogg are common choices. They are converted and cached before paging.
+SRTP/DTLS-SRTP and proprietary vendor payloads are rejected rather than silently downgraded; use a
+trusted voice VLAN or a standards-compliant paging gateway when encrypted media is required.
 
 ## Automation API
 

@@ -55,10 +55,13 @@ class Transmitter:
         loopback: bool = False,
         dry_run: bool = False,
         socket_factory: type[socket.socket] = socket.socket,
+        timestamp_step: int = 160,
+        packet_seconds: float = 0.020,
     ) -> None:
         self.wire_format = wire_format
         self.interface_ip = interface_ip
         self.dry_run = dry_run
+        self.packet_seconds = packet_seconds
         self._targets: list[_Target] = []
         for index, item in enumerate(destinations):
             endpoint = (
@@ -74,7 +77,7 @@ class Transmitter:
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0xB8)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface_ip))
-            self._targets.append(_Target(endpoint, sock, StreamState()))
+            self._targets.append(_Target(endpoint, sock, StreamState(timestamp_step=timestamp_step)))
 
     def close(self) -> None:
         for target in self._targets:
@@ -102,7 +105,7 @@ class Transmitter:
             if cancel_event is not None and cancel_event.is_set():
                 cancelled = True
                 break
-            target_time = start + index * 0.020
+            target_time = start + index * self.packet_seconds
             remaining = target_time - time.monotonic()
             if remaining > 0:
                 if cancel_event is not None:

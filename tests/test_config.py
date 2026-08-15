@@ -55,6 +55,15 @@ def test_protocol_configuration_rejects_credential_leaks_and_tls_downgrade() -> 
             port=443,
             webhook_url="https://user:password@device/trigger",
         )
+    with pytest.raises(ValueError, match="Poly Group Page requires PCMU"):
+        Destination(
+            name="paging",
+            protocol="multicast",
+            port=5004,
+            group="239.1.2.3",
+            wire_format="poly_group_page",
+            codecs=["g722"],
+        )
 
 
 def test_sound_names_cannot_escape_library() -> None:

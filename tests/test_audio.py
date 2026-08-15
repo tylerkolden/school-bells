@@ -38,11 +38,31 @@ def test_transcode_frame_count_and_cache(tmp_path: Path, monkeypatch) -> None:
     assert calls == first_calls
 
 
-def test_final_frame_is_zero_padded(tmp_path: Path) -> None:
+def test_common_telephony_codecs_produce_twenty_ms_frames(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = make_wav(tmp_path / "tone.wav", 0.2)
+    monkeypatch.setenv("BELL_AUDIO_CACHE", str(tmp_path / "cache"))
+    for codec in ("pcmu", "pcma", "g722"):
+        spec = audio.codec_spec(codec)
+        raw = audio.transcode(source, codec)  # type: ignore[arg-type]
+        frames = list(audio.load_frames(raw, spec.frame_bytes))
+        assert len(frames) == 10
+        assert all(len(frame) == spec.frame_bytes for frame in frames)
+
+
+def test_final_pcmu_frame_is_padded_with_digital_silence(tmp_path: Path) -> None:
     raw = tmp_path / "partial.ulaw"
     raw.write_bytes(b"a" * 161)
     frames = list(audio.load_frames(raw))
-    assert frames == [b"a" * 160, b"a" + b"\0" * 159]
+    assert frames == [b"a" * 160, b"a" + b"\xff" * 159]
+
+
+def test_stateful_codec_final_frame_is_not_invented(tmp_path: Path) -> None:
+    raw = tmp_path / "partial.g722"
+    raw.write_bytes(b"a" * 161)
+    frames = list(audio.load_frames(raw, 160, None))
+    assert frames == [b"a" * 160, b"a"]
 
 
 def test_probe_and_prep(tmp_path: Path) -> None:
