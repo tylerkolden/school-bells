@@ -18,6 +18,26 @@ def test_resolve_no_bell_and_override(config_tree: Path) -> None:
     assert weekend.events == () and weekend.reason == "no schedule assigned"
 
 
+def test_standing_item_preserves_advanced_delivery_fields(config_tree: Path) -> None:
+    config = load_config(config_tree)
+    item = config.standing_items[0]
+    item.pre_tone = "class-bell.wav"
+    item.repeat_count = 3
+    item.repeat_interval_seconds = 2
+    item.priority = 95
+    item.busy_policy = "preempt"
+    event = next(
+        planned.event
+        for planned in resolve_day(date(2027, 3, 15), config).events
+        if planned.source == "Standing" and planned.event.label == item.label
+    )
+    assert event.pre_tone == "class-bell.wav"
+    assert event.repeat_count == 3
+    assert event.repeat_interval_seconds == 2
+    assert event.priority == 95
+    assert event.busy_policy == "preempt"
+
+
 def test_dst_wall_clock_times_do_not_shift(config_tree: Path) -> None:
     config = load_config(config_tree)
     # Assign schedules on the exact 2027 US transition dates (both Sundays) so the test checks

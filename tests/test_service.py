@@ -10,24 +10,29 @@ from bell.protocols.base import DeliveryOutcome
 from bell.service import ServiceRuntime, interface_present, validate_startup
 
 
-def test_loopback_interface_and_startup_validation(config_tree: Path) -> None:
+def test_loopback_interface_and_startup_validation(config_tree: Path, monkeypatch) -> None:
     settings = config_tree / "settings.yaml"
     text = settings.read_text(encoding="utf-8").replace(
         "interface_ip: 192.168.10.20", "interface_ip: 127.0.0.1"
     )
     settings.write_text(text, encoding="utf-8")
     config = load_config(config_tree)
+    monkeypatch.setattr("bell.service.clock_sync_status", lambda: (True, "synchronized"))
     assert interface_present("127.0.0.1")[0]
     assert validate_startup(config) == []
 
 
-def test_health_and_readiness_shape(config_tree: Path) -> None:
+def test_health_and_readiness_shape(config_tree: Path, monkeypatch) -> None:
+    monkeypatch.setattr("bell.service.clock_sync_status", lambda: (False, "not synchronized"))
     runtime = ServiceRuntime(load_config(config_tree))
     client = TestClient(runtime.health_app)
     ready = client.get("/ready")
-    assert ready.status_code == 200 and ready.json()["ready"] is True
+    assert ready.status_code == 503 and ready.json()["ready"] is False
     health = client.get("/health").json()
-    assert health["status"] == "ok"
+    assert health["status"] == "degraded"
+    assert "clock not synchronized" in health["readiness_reasons"]
+    assert "scheduler not running" in health["readiness_reasons"]
+    assert "endpoint monitor not running" in health["readiness_reasons"]
     assert health["config_valid"] is True
     assert {"last_fire", "next_scheduled_fire", "config_hash", "kill_switch", "uptime_seconds", "clock"} <= health.keys()
 
@@ -64,3 +69,16 @@ def test_startup_rejects_short_or_shared_control_keys(config_tree: Path, monkeyp
     errors = validate_startup(config)
     assert any("BELL_UI_PASSWORD" in item for item in errors)
     assert any("must be different" in item for item in errors)
+
+
+def test_page_duration_limit_is_enforced_before_delivery(config_tree: Path) -> None:
+    config = load_config(config_tree)
+    config.settings.max_page_seconds = 0.1
+    runtime = ServiceRuntime(config)
+    event = config.schedule_map["Regular Day"].events[0]
+    try:
+        runtime.transmit_event(event, config, "Test")
+    except Exception as exc:
+        assert "max_page_seconds" in str(exc)
+    else:
+        raise AssertionError("overlong page was not rejected")

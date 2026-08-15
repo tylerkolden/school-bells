@@ -133,6 +133,15 @@ class BellEvent(BaseModel):
     priority: int = Field(default=50, ge=0, le=100)
     busy_policy: Literal["skip", "queue", "preempt"] = "skip"
 
+    @field_validator("sound", "pre_tone")
+    @classmethod
+    def sound_is_library_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or Path(value).name != value or value in {".", ".."}:
+            raise ValueError("must be a filename in the configured sound library")
+        return value
+
 
 class BellSchedule(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -205,6 +214,9 @@ class Settings(BaseModel):
     rtc_required: bool = False
     endpoint_check_interval_seconds: int = Field(default=60, ge=15, le=3600)
     api_rate_limit_per_minute: int = Field(default=10, ge=1, le=120)
+    clock_sync_required: bool = True
+    max_audio_seconds: float = Field(default=30.0, ge=0.25, le=600.0)
+    max_page_seconds: float = Field(default=120.0, ge=1.0, le=1800.0)
     sounds_dir: Path = Path("sounds")
     state_dir: Path = Path("state")
     log_dir: Path = Path("logs")

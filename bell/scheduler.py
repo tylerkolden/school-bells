@@ -65,7 +65,7 @@ def resolve_day(day: date, config: BellConfig) -> DayPlan:
             )
     for item in config.standing_items:
         if schedule_name and item.enabled:
-            event = BellEvent(time=item.time, sound=item.sound, zone=item.zone, label=item.label)
+            event = BellEvent.model_validate(item.model_dump(exclude={"enabled"}))
             events.append(PlannedEvent(event, "Standing", datetime.combine(day, item.time, timezone)))
     events.sort(key=lambda item: item.scheduled_at)
     reason = None if events else "no schedule assigned"

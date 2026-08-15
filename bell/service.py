@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from bell.audio import transcode
 from bell.config import BellConfig, BellEvent, ConfigLoadError, load_config
@@ -101,7 +102,13 @@ def validate_startup(config: BellConfig) -> list[str]:
         sounds.update(item.pre_tone for item in config.standing_items if item.enabled and item.pre_tone)
         for sound_name in sorted(sounds):
             try:
-                transcode(config.sounds_path / sound_name)
+                raw = transcode(config.sounds_path / sound_name)
+                duration = raw.stat().st_size / 8000.0
+                if duration > config.settings.max_audio_seconds:
+                    errors.append(
+                        f"sound {sound_name} is {duration:.2f}s; maximum is "
+                        f"{config.settings.max_audio_seconds:.2f}s"
+                    )
             except Exception as exc:
                 errors.append(f"cannot transcode {sound_name}: {exc}")
     interface_ok, interface_detail = interface_present(config.settings.interface_ip)
@@ -134,7 +141,9 @@ def validate_startup(config: BellConfig) -> list[str]:
         if secret_env and not os.environ.get(secret_env) and endpoint.required:
             errors.append(f"required destination {endpoint.name}: environment variable {secret_env} is not set")
     synced, detail = clock_sync_status()
-    if synced is not True:
+    if synced is not True and config.settings.clock_sync_required:
+        errors.append(f"system clock is not synchronized: {detail}")
+    elif synced is not True:
         LOGGER.warning("clock_sync_warning", extra={"status": synced, "detail": detail})
     return errors
 
@@ -171,8 +180,25 @@ class ServiceRuntime:
             for item in endpoints
             if item["name"] in required and item["state"] in {"unhealthy", "circuit_open"}
         ]
+        known = {str(item["name"]) for item in endpoints}
+        unknown_required = sorted(required - known)
+        scheduler_running = self.scheduler.scheduler.running
+        monitor_running = self.monitor.is_alive
+        reasons: list[str] = []
+        if unhealthy:
+            reasons.append("required endpoint unhealthy")
+        if unknown_required:
+            reasons.append("required endpoint not checked")
+        if sync is not True and self.config.settings.clock_sync_required:
+            reasons.append("clock not synchronized")
+        if not scheduler_running:
+            reasons.append("scheduler not running")
+        if not monitor_running:
+            reasons.append("endpoint monitor not running")
         return {
-            "status": "degraded" if unhealthy else "ok",
+            "status": "degraded" if reasons else "ok",
+            "ready": not reasons,
+            "readiness_reasons": reasons,
             "last_fire": self.last_fire,
             "next_scheduled_fire": next_fire.isoformat() if next_fire else None,
             "config_hash": self.config.hash,
@@ -185,6 +211,9 @@ class ServiceRuntime:
             "active_page": self.coordinator.snapshot(),
             "endpoints": endpoints,
             "unhealthy_required_endpoints": unhealthy,
+            "unknown_required_endpoints": unknown_required,
+            "scheduler_running": scheduler_running,
+            "monitor_running": monitor_running,
             "config_valid": True,
         }
 
@@ -198,6 +227,30 @@ class ServiceRuntime:
         started = datetime.now(ZoneInfo(config.settings.timezone))
         reports: list[DeliveryReport] = []
         try:
+            raw = transcode(config.sounds_path / event.sound)
+            main_duration = raw.stat().st_size / 8000.0
+            pre_raw = transcode(config.sounds_path / event.pre_tone) if event.pre_tone else None
+            pre_duration = pre_raw.stat().st_size / 8000.0 if pre_raw else 0.0
+            if main_duration > config.settings.max_audio_seconds:
+                raise PageDeliveryError(
+                    f"sound duration {main_duration:.2f}s exceeds max_audio_seconds "
+                    f"{config.settings.max_audio_seconds:.2f}s"
+                )
+            if pre_duration > config.settings.max_audio_seconds:
+                raise PageDeliveryError(
+                    f"pre-tone duration {pre_duration:.2f}s exceeds max_audio_seconds "
+                    f"{config.settings.max_audio_seconds:.2f}s"
+                )
+            total_duration = (
+                pre_duration
+                + main_duration * event.repeat_count
+                + event.repeat_interval_seconds * max(0, event.repeat_count - 1)
+            )
+            if total_duration > config.settings.max_page_seconds:
+                raise PageDeliveryError(
+                    f"page duration {total_duration:.2f}s exceeds max_page_seconds "
+                    f"{config.settings.max_page_seconds:.2f}s"
+                )
             busy_policy = (
                 "preempt"
                 if event.priority >= config.safety.emergency_priority_threshold
@@ -210,7 +263,7 @@ class ServiceRuntime:
                     f"{started.isoformat()}|{schedule_name}|{event.label}|{event.zone}".encode()
                 ).hexdigest()
                 if event.pre_tone:
-                    pre_raw = transcode(config.sounds_path / event.pre_tone)
+                    assert pre_raw is not None
                     reports.append(
                         self.delivery.deliver(
                             pre_raw,
@@ -223,7 +276,6 @@ class ServiceRuntime:
                     )
                     if lease.cancel_event.wait(0.10):
                         raise PageDeliveryError("page was preempted after pre-tone")
-                raw = transcode(config.sounds_path / event.sound)
                 for repeat in range(event.repeat_count):
                     reports.append(
                         self.delivery.deliver(
@@ -284,17 +336,15 @@ class ServiceRuntime:
             return self.health_data()
 
         @app.get("/ready")
-        def ready() -> dict[str, object]:
-            endpoints = self.endpoint_registry.snapshot()
-            required = {
-                item.name for item in self.config.destinations if item.enabled and item.required
+        def ready() -> JSONResponse:
+            health = self.health_data()
+            payload = {
+                "ready": health["ready"],
+                "readiness_reasons": health["readiness_reasons"],
+                "unhealthy_required_endpoints": health["unhealthy_required_endpoints"],
+                "unknown_required_endpoints": health["unknown_required_endpoints"],
             }
-            unhealthy = [
-                item["name"]
-                for item in endpoints
-                if item["name"] in required and item["state"] in {"unhealthy", "circuit_open"}
-            ]
-            return {"ready": not unhealthy, "unhealthy_required_endpoints": unhealthy}
+            return JSONResponse(payload, status_code=200 if health["ready"] else 503)
 
         return app
 

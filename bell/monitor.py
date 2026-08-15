@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
@@ -13,6 +14,8 @@ from bell.protocols.base import DeliveryOutcome
 from bell.protocols.http import WebhookClient
 from bell.protocols.sip import SIPClient
 from bell.wire.poly_group_page import PolyGroupPage
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -88,6 +91,10 @@ class EndpointMonitor:
         if self._thread:
             self._thread.join(timeout=5)
 
+    @property
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
     def update_config(self, config: BellConfig) -> None:
         self.config = config
 
@@ -96,19 +103,37 @@ class EndpointMonitor:
         for destination in self.config.destinations:
             if not destination.enabled:
                 continue
-            if destination.protocol == "multicast":
-                outcome = self._check_multicast(destination)
-            elif destination.protocol == "sip":
-                outcome = SIPClient(destination, self.config.settings.interface_ip).options()
-            else:
-                outcome = WebhookClient().check(destination)
+            started = time.monotonic()
+            try:
+                if destination.protocol == "multicast":
+                    outcome = self._check_multicast(destination)
+                elif destination.protocol == "sip":
+                    outcome = SIPClient(destination, self.config.settings.interface_ip).options()
+                else:
+                    outcome = WebhookClient().check(destination)
+            except Exception as exc:
+                LOGGER.exception(
+                    "endpoint_probe_failed", extra={"destination": destination.name}
+                )
+                outcome = DeliveryOutcome(
+                    destination.name,
+                    destination.protocol,
+                    False,
+                    "probe_error",
+                    str(exc),
+                    1,
+                    time.monotonic() - started,
+                )
             self.registry.record(outcome)
             outcomes.append(outcome)
         return outcomes
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.check_once()
+            try:
+                self.check_once()
+            except Exception:
+                LOGGER.exception("endpoint_monitor_cycle_failed")
             self._stop.wait(self.config.settings.endpoint_check_interval_seconds)
 
     def _check_multicast(self, destination: Destination) -> DeliveryOutcome:
