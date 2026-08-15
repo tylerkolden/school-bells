@@ -1,4 +1,4 @@
-FROM python:3.13-slim-bookworm@sha256:00faa2debb87529f9f0764e9491d8ba400a3678976616c3bd7cb193745ac20d1
+FROM python:3.14-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52
 
 LABEL org.opencontainers.image.source="https://github.com/tylerkolden/school-bells" \
       org.opencontainers.image.description="Safe local test environment for the School Bell System"
