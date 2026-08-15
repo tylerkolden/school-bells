@@ -40,8 +40,8 @@ HealthProvider = Callable[[], dict[str, Any]]
 
 class APITrigger(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    sound: str
-    zone: str
+    sound: str = Field(min_length=1, max_length=255)
+    zone: str = Field(min_length=1, max_length=100)
     label: str = Field(default="Automation trigger", min_length=1, max_length=100)
     priority: int = Field(default=50, ge=0, le=100)
     repeat_count: int = Field(default=1, ge=1, le=10)
@@ -53,6 +53,13 @@ class APITrigger(BaseModel):
     def sound_is_library_name(cls, value: str) -> str:
         if not value or Path(value).name != value or value in {".", ".."}:
             raise ValueError("sound must be a filename in the configured sound library")
+        return value
+
+    @field_validator("sound", "zone", "label")
+    @classmethod
+    def no_control_characters(cls, value: str) -> str:
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("must not contain control characters")
         return value
 
 
@@ -73,6 +80,11 @@ class RateLimiter:
                 return False
             requests.append(now)
             return True
+
+
+def _safe_log_text(value: str, limit: int = 255) -> str:
+    """Keep untrusted structured-log fields single-line and bounded."""
+    return value.replace("\r", "\\r").replace("\n", "\\n")[:limit]
 
 
 def create_app(
@@ -174,8 +186,7 @@ def create_app(
             scope = "normal"
         else:
             raise HTTPException(status_code=401, detail="A valid Bell API key is required")
-        identity = hashlib.sha256(supplied.encode()).hexdigest()
-        if not rate_limiter.allow(identity):
+        if not rate_limiter.allow(scope):
             raise HTTPException(status_code=429, detail="Automation rate limit exceeded")
         return scope
 
@@ -692,7 +703,10 @@ def create_app(
             "ui_action" if emergency else "api_action",
             extra={
                 "action": "api_trigger",
-                "target": {"zone": trigger.zone, "sound": trigger.sound},
+                "target": {
+                    "zone": _safe_log_text(trigger.zone, 100),
+                    "sound": _safe_log_text(trigger.sound),
+                },
                 "priority": trigger.priority,
                 "result": status,
             },
