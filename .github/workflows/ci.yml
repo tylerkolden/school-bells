@@ -22,7 +22,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update -o Acquire::Retries=3
+            sudo apt-get install --yes ffmpeg
+          fi
+          ffmpeg -version
       - name: Install project
         run: python -m pip install --upgrade pip 'setuptools>=83' && python -m pip install -e '.[dev]'
       - name: Static analysis
