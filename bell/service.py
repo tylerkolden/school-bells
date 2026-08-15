@@ -100,6 +100,12 @@ def validate_startup(config: BellConfig) -> list[str]:
         )
         sounds.update(item.sound for item in config.standing_items if item.enabled)
         sounds.update(item.pre_tone for item in config.standing_items if item.enabled and item.pre_tone)
+        codecs = {
+            codec
+            for endpoint in config.destinations
+            if endpoint.enabled and endpoint.protocol in {"multicast", "sip"}
+            for codec in endpoint.codecs
+        }
         for sound_name in sorted(sounds):
             try:
                 raw = transcode(config.sounds_path / sound_name)
@@ -109,6 +115,8 @@ def validate_startup(config: BellConfig) -> list[str]:
                         f"sound {sound_name} is {duration:.2f}s; maximum is "
                         f"{config.settings.max_audio_seconds:.2f}s"
                     )
+                for codec in sorted(codecs - {"pcmu"}):
+                    transcode(config.sounds_path / sound_name, codec)
             except Exception as exc:
                 errors.append(f"cannot transcode {sound_name}: {exc}")
     interface_ok, interface_detail = interface_present(config.settings.interface_ip)

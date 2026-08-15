@@ -32,6 +32,9 @@ class Destination(BaseModel):
     port: int = Field(ge=1, le=65535)
     ttl: int = Field(default=1, ge=0, le=255)
     wire_format: Literal["plain_rtp", "poly_group_page"] | None = None
+    codecs: list[Literal["pcmu", "pcma", "g722"]] = Field(
+        default_factory=lambda: ["pcmu"], min_length=1, max_length=3
+    )
     sip_uri: str | None = None
     sip_host: str | None = None
     sip_transport: Literal["udp", "tcp", "tls"] = "udp"
@@ -75,10 +78,21 @@ class Destination(BaseModel):
             raise ValueError("must be a multicast IPv4 address in 224.0.0.0/4")
         return value
 
+    @field_validator("codecs")
+    @classmethod
+    def codecs_are_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("codecs must not contain duplicates")
+        return value
+
     @model_validator(mode="after")
     def protocol_fields(self) -> Destination:
         if self.protocol == "multicast" and self.group is None:
             raise ValueError("multicast destinations require group")
+        if self.protocol == "multicast" and len(self.codecs) != 1:
+            raise ValueError("multicast destinations require exactly one codec")
+        if self.wire_format == "poly_group_page" and self.codecs != ["pcmu"]:
+            raise ValueError("Poly Group Page requires PCMU codec")
         if self.protocol == "sip":
             if not self.sip_uri or not self.sip_uri.lower().startswith(("sip:", "sips:")):
                 raise ValueError("SIP destinations require a sip: or sips: sip_uri")
@@ -348,6 +362,15 @@ def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
                 errors.append(
                     f"destination {destination.name!r}: TLS CA file does not exist: {destination.tls_ca_file}"
                 )
+        effective_wire = destination.wire_format or config.settings.wire_format
+        if (
+            destination.protocol == "multicast"
+            and effective_wire == "poly_group_page"
+            and destination.codecs != ["pcmu"]
+        ):
+            errors.append(
+                f"destination {destination.name!r}: Poly Group Page requires PCMU codec"
+            )
     destinations = config.destination_map
     zones = config.zone_map
     schedules = config.schedule_map

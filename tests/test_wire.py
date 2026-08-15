@@ -21,10 +21,21 @@ def test_plain_rtp_rejects_channel() -> None:
         PlainRTP().build_packet(b"x", 0, 0, 1, False, 23)
 
 
+def test_plain_rtp_uses_selected_static_payload_type() -> None:
+    packet = PlainRTP(payload_type=9).build_packet(b"g722", 1, 2, 3, False, 0)
+    assert packet[1] & 0x7F == 9
+
+
 def test_stream_state_wraps() -> None:
     state = StreamState(seq=65535, timestamp=0xFFFFFF60, ssrc=7)
     assert state.next() == (65535, 0xFFFFFF60, 7)
     assert state.next() == (0, 0, 7)
+
+
+def test_stream_state_uses_configured_rtp_clock_step() -> None:
+    state = StreamState(seq=1, timestamp=100, ssrc=7, timestamp_step=960)
+    state.next()
+    assert state.next()[1] == 1060
 
 
 def test_poly_refuses_uncalibrated_output() -> None:

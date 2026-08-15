@@ -4,6 +4,7 @@ destinations:
     group: 239.255.255.255
     port: 601
     ttl: 1
+    codecs: [pcmu]
     enabled: true
 
   # Optional standards-based SIP paging target. Secrets stay in bell.env.
@@ -13,6 +14,8 @@ destinations:
     sip_uri: sip:page@example.invalid
     sip_host: pbx.example.invalid
     sip_transport: tls
+    # Ordered preference. The negotiated answer selects one common codec.
+    codecs: [g722, pcmu, pcma]
     sip_username: bell-system
     sip_password_env: BELL_SIP_PASSWORD
     tls_server_name: pbx.example.invalid
