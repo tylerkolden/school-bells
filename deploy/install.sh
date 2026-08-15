@@ -112,7 +112,26 @@ install -d -m 0755 -o root -g root "$stage"
 cp -a "$SOURCE_DIR/bell" "$SOURCE_DIR/deploy" "$SOURCE_DIR/docs" "$SOURCE_DIR/scripts" "$stage/"
 install -m 0644 "$SOURCE_DIR/pyproject.toml" "$SOURCE_DIR/README.md" "$stage/"
 if [[ -d "$SOURCE_DIR/wheelhouse" ]]; then
-  cp -a "$SOURCE_DIR/wheelhouse" "$stage/wheelhouse"
+  machine="$(uname -m)"
+  if [[ "$machine" != "aarch64" && "$machine" != "arm64" ]]; then
+    echo "The production wheelhouse requires 64-bit ARM (aarch64); found: $machine" >&2
+    exit 1
+  fi
+  runtime_abi="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
+  case "$runtime_abi" in
+    cp311|cp312|cp313) ;;
+    *)
+      echo "The production wheelhouse supports Python 3.11-3.13; found: $(python3 --version)" >&2
+      exit 1
+      ;;
+  esac
+  wheelhouse_source="$SOURCE_DIR/wheelhouse/$runtime_abi"
+  if [[ ! -d "$wheelhouse_source" ]]; then
+    echo "The release is missing its $runtime_abi ARM64 wheelhouse." >&2
+    exit 1
+  fi
+  install -d -m 0755 -o bell -g bell "$stage/wheelhouse"
+  cp -a "$wheelhouse_source/." "$stage/wheelhouse/"
 fi
 ln -s ../../shared/config "$stage/config"
 ln -s ../../shared/sounds "$stage/sounds"
