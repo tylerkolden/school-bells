@@ -7,6 +7,9 @@ settings:
   rtc_required: false
   endpoint_check_interval_seconds: 60
   api_rate_limit_per_minute: 10
+  clock_sync_required: true
+  max_audio_seconds: 30
+  max_page_seconds: 120
   sounds_dir: sounds
   state_dir: state
   log_dir: logs

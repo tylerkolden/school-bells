@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from bell.config import ConfigLoadError, Destination, load_config
+from bell.config import BellEvent, ConfigLoadError, Destination, load_config
 
 
 def test_example_config_is_complete(config_tree: Path) -> None:
@@ -55,6 +55,12 @@ def test_protocol_configuration_rejects_credential_leaks_and_tls_downgrade() -> 
             port=443,
             webhook_url="https://user:password@device/trigger",
         )
+
+
+def test_sound_names_cannot_escape_library() -> None:
+    for sound in ("../secret.wav", "/tmp/secret.wav", "folder/tone.wav"):
+        with pytest.raises(ValueError, match="sound library"):
+            BellEvent(time="08:00", sound=sound, zone="indoors", label="Unsafe")
     with pytest.raises(ValueError, match="require sip_transport: tls"):
         Destination(
             name="sip",

@@ -30,3 +30,17 @@ def test_required_poly_destination_reports_uncalibrated(config_tree) -> None:
     outcomes = EndpointMonitor(config, registry).check_once()
     poly = next(item for item in outcomes if item.destination == "all")
     assert not poly.success and poly.status == "not_calibrated"
+
+
+def test_probe_exception_becomes_health_outcome(config_tree, monkeypatch) -> None:
+    config = load_config(config_tree)
+    monitor = EndpointMonitor(config, EndpointRegistry())
+
+    def fail(_destination):
+        raise RuntimeError("simulated probe crash")
+
+    monkeypatch.setattr(monitor, "_check_multicast", fail)
+    outcome = next(item for item in monitor.check_once() if item.destination == "all")
+    assert not outcome.success
+    assert outcome.status == "probe_error"
+    assert "simulated probe crash" in outcome.detail

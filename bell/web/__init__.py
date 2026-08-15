@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from ruamel.yaml import YAML
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -45,6 +45,13 @@ class APITrigger(BaseModel):
     repeat_count: int = Field(default=1, ge=1, le=10)
     repeat_interval_seconds: float = Field(default=0.0, ge=0.0, le=30.0)
     override_hours: bool = False
+
+    @field_validator("sound")
+    @classmethod
+    def sound_is_library_name(cls, value: str) -> str:
+        if not value or Path(value).name != value or value in {".", ".."}:
+            raise ValueError("sound must be a filename in the configured sound library")
+        return value
 
 
 class RateLimiter:

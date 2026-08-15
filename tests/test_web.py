@@ -108,3 +108,14 @@ def test_automation_api_is_authenticated_emergency_scoped_and_idempotent(
     )
     assert replay.status_code == 200 and replay.json()["idempotent_replay"] is True
     assert calls == ["Automation API:everywhere"]
+
+
+def test_automation_api_rejects_sound_path_escape(config_tree: Path, monkeypatch) -> None:
+    monkeypatch.setenv("BELL_API_KEY", "normal-key")
+    client = TestClient(create_app(config_tree, password="test"))
+    response = client.post(
+        "/api/v1/trigger",
+        json={"sound": str((config_tree.parent / "outside.wav").resolve()), "zone": "indoors"},
+        headers={"X-Bell-API-Key": "normal-key", "Idempotency-Key": "path-escape"},
+    )
+    assert response.status_code == 422

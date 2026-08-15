@@ -113,6 +113,11 @@ Events may also define a bounded pre-tone/repeat/priority policy:
 `emergency_priority_threshold` always uses cooperative preemption; it cannot be accidentally
 configured to wait behind a routine page.
 
+`clock_sync_required` defaults to `true`, so both startup validation and the readiness endpoint
+fail closed when NTP synchronization cannot be confirmed. `max_audio_seconds` limits each source
+recording and `max_page_seconds` limits the complete pre-tone/repeat sequence; these bounds are
+checked before any receiver is contacted. Set a larger value deliberately for longer announcements.
+
 ## Delivery protocols
 
 A zone may reference any mix of these destination types:
@@ -137,6 +142,10 @@ The office service exposes JSON endpoints on the same port as the UI:
 - `GET /api/v1/health`
 - `GET /api/v1/today`
 - `POST /api/v1/trigger`
+
+The service-only `GET /ready` endpoint returns HTTP 503 until the clock, scheduler, monitor, and
+every required destination are ready. This makes it suitable for systemd and external watchdogs;
+the JSON response names each failing readiness condition.
 
 Set separate `BELL_API_KEY` and `BELL_EMERGENCY_API_KEY` values. Every request uses
 `X-Bell-API-Key`; triggers also require a stable `Idempotency-Key`. Only the emergency key can use an
