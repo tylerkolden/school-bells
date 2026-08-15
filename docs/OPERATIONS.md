@@ -62,8 +62,8 @@ do not manually offset YAML times for DST.
 After every configuration change, reboot, phone reprovisioning, or software upgrade, run:
 
 ```bash
-cd /opt/bell
-.venv/bin/python scripts/acceptance.py --config-dir config
+cd /opt/bell/current
+.venv/bin/python scripts/acceptance.py --config-dir /opt/bell/config
 ```
 
 Keep the full production schedule disabled until Poly calibration passes and one observed channel-23
@@ -90,8 +90,13 @@ Scrape `http://127.0.0.1:8000/metrics` through a local monitoring agent. Alert w
 zero, a required `bell_endpoint_healthy` value is zero, the service restarts, or no fresh JSON log
 records arrive. The HTTP endpoint is intentionally loopback-only; do not expose it directly.
 
-Run `sudo bash deploy/install.sh` from a reviewed checkout to upgrade. Each upgrade archives the
-installed configuration and state under `/var/backups/bell-system` before copying or installing.
-Archives are root-only and retained for 90 days. The installer performs the same startup validation
-used by systemd before restarting, so a bad codec, interface, clock, secret reference, or sound file
-does not replace a running process with one that cannot start.
+Use **Updates** in the operator console for routine upgrades after completing the one-time setup in
+`docs/UPDATES.md`. Check and install only in a quiet maintenance window. The root-owned updater
+accepts only newer immutable production releases from the fixed repository, validates the staged
+release, and waits for readiness after restart. If readiness fails, it atomically restores the
+previous release. Each upgrade also archives configuration and state under
+`/var/backups/bell-system`; archives are root-only and retained for 90 days.
+
+`sudo bash deploy/install.sh` from a physically reviewed checkout remains the local recovery path,
+not the routine update mechanism. Never expose the update UI to the internet or grant the `bell`
+service account general sudo access.

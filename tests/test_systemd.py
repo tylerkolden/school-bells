@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from bell import systemd
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_watchdog_interval_uses_half_systemd_timeout(monkeypatch) -> None:
@@ -33,3 +37,25 @@ def test_notify_is_optional_and_supports_abstract_socket(monkeypatch) -> None:
     monkeypatch.setattr(systemd.socket, "socket", FakeSocket)
     assert systemd.notify("READY=1") is True
     assert sent == [(b"READY=1", "\0bell-notify")]
+
+
+def test_update_unit_has_fixed_privilege_boundary() -> None:
+    service = (ROOT / "deploy" / "bell-update.service").read_text(encoding="utf-8")
+    path = (ROOT / "deploy" / "bell-update.path").read_text(encoding="utf-8")
+    assert "User=root" in service
+    assert "ExecStart=/usr/bin/python3 /usr/local/lib/bell-system/ota_updater.py process" in service
+    assert "ProtectSystem=strict" in service
+    assert "NoNewPrivileges=yes" in service
+    assert "--repository" not in service
+    assert "PathExists=/opt/bell/state/update/request.json" in path
+
+
+def test_installer_stages_before_atomic_activation_and_supports_offline_wheels() -> None:
+    installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    preflight = installer.index("--check-only --config-dir")
+    activation = installer.index('mv -Tf -- "$new_link" "$APP_DIR/current"')
+    restart = installer.index("systemctl restart bell-system.service")
+    assert preflight < activation < restart
+    assert "--no-index --find-links" in installer
+    unit = (ROOT / "deploy" / "bell-system.service").read_text(encoding="utf-8")
+    assert "WorkingDirectory=/opt/bell/current" in unit

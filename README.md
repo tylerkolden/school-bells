@@ -38,6 +38,8 @@ deliberately restricted to PCMU for receiver compatibility.
 - `bell/safety.py` rechecks all safety rules immediately before every fire.
 - `bell/service.py` runs the scheduler and localhost health endpoints.
 - `bell/web/` is a password-protected, server-rendered front-office UI.
+- `deploy/ota_updater.py` installs immutable production releases through a privilege-separated,
+  web-triggered systemd job with health-checked rollback.
 - `bell/probe.py` and `bell/listen.py` are field diagnostic tools.
 
 ## Network and hardware prerequisites
@@ -196,14 +198,20 @@ password once; store it in the school's password manager.
 The front-office UI binds on `0.0.0.0:8080`; firewall it to the trusted school LAN and never
 publish it to the internet. The health service stays on `127.0.0.1:8000`.
 
-Run the installer as root so it can install and enable the systemd unit; it performs Python
-package installation as the unprivileged `bell` account. The installer copies a checkout when run
-outside `/opt/bell`, preserves local configuration and sounds, creates a 90-day deployment backup,
-validates the installed code/config/audio before restart, and only then activates the hardened unit:
+Run the installer as root so it can install and enable the systemd units; it performs Python
+package installation as the unprivileged `bell` account. The installer preserves local configuration
+and sounds under `/opt/bell/shared`, creates a 90-day deployment backup, stages a versioned release,
+validates the installed code/config/audio before an atomic switch, and only then activates the
+hardened unit:
 
 ```bash
 sudo bash deploy/install.sh
 ```
+
+After the first install, a signed-in administrator can use **Updates** in the LAN console. The Pi—not
+the viewing computer—checks GitHub and installs only a newer, immutable, workflow-published stable
+release. It refuses active/near-bell maintenance and automatically switches back if readiness fails.
+See [secure web OTA setup and threat model](docs/UPDATES.md) before publishing the first release.
 
 If an RTC is installed and verified, set `rtc_required: true` so acceptance checks enforce it.
 
