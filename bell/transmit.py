@@ -14,6 +14,7 @@ from pathlib import Path
 from bell.audio import CODECS, codec_spec, load_frames, transcode
 from bell.wire import get_wire_format
 from bell.wire.base import StreamState, WireFormat
+from bell.wire.poly_group_page import POLY_ALERT, POLY_END, PolyGroupPage
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class _Target:
     endpoint: DestinationEndpoint
     sock: socket.socket | None
     state: StreamState
+    previous_payload: bytes | None = None
     error: str | None = None
 
 
@@ -79,6 +81,48 @@ class Transmitter:
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface_ip))
             self._targets.append(_Target(endpoint, sock, StreamState(timestamp_step=timestamp_step)))
 
+    def _send_packet(
+        self,
+        target: _Target,
+        packet: bytes,
+        byte_counts: dict[str, int],
+    ) -> None:
+        if target.error is not None:
+            return
+        if target.sock is not None:
+            try:
+                sent = target.sock.sendto(packet, (target.endpoint.group, target.endpoint.port))
+                if sent != len(packet):
+                    raise OSError(f"short UDP send: {sent} of {len(packet)} bytes")
+            except OSError as exc:
+                target.error = str(exc)
+                LOGGER.error(
+                    "destination_send_failed",
+                    extra={"destination": target.endpoint.name, "detail": str(exc)},
+                )
+                return
+        byte_counts[target.endpoint.name] += len(packet)
+
+    def _send_poly_controls(
+        self,
+        wire: PolyGroupPage,
+        opcode: int,
+        channel: int,
+        count: int,
+        byte_counts: dict[str, int],
+    ) -> None:
+        started = time.monotonic()
+        for index in range(count):
+            remaining = started + index * wire.control_interval_seconds - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            for target in self._targets:
+                self._send_packet(
+                    target,
+                    wire.build_control_packet(opcode, channel, target.state.ssrc),
+                    byte_counts,
+                )
+
     def close(self) -> None:
         for target in self._targets:
             if target.sock is not None:
@@ -101,11 +145,23 @@ class Transmitter:
         drift_values: list[float] = []
         byte_counts = {target.endpoint.name: 0 for target in self._targets}
         cancelled = False
-        for index, frame in enumerate(frames):
+        poly_wire = self.wire_format if isinstance(self.wire_format, PolyGroupPage) else None
+        if poly_wire is not None:
+            self._send_poly_controls(
+                poly_wire,
+                POLY_ALERT,
+                channel,
+                poly_wire.alert_count,
+                byte_counts,
+            )
             if cancel_event is not None and cancel_event.is_set():
                 cancelled = True
+        audio_start = time.monotonic()
+        for index, frame in enumerate(frames):
+            if cancelled or (cancel_event is not None and cancel_event.is_set()):
+                cancelled = True
                 break
-            target_time = start + index * self.packet_seconds
+            target_time = audio_start + index * self.packet_seconds
             remaining = target_time - time.monotonic()
             if remaining > 0:
                 if cancel_event is not None:
@@ -123,24 +179,26 @@ class Transmitter:
                     continue
                 seq, timestamp, ssrc = target.state.next()
                 packet = self.wire_format.build_packet(
-                    frame, seq, timestamp, ssrc, index == 0, channel
+                    frame,
+                    seq,
+                    timestamp,
+                    ssrc,
+                    index == 0,
+                    channel,
+                    target.previous_payload,
                 )
-                if target.sock is not None:
-                    try:
-                        sent = target.sock.sendto(
-                            packet, (target.endpoint.group, target.endpoint.port)
-                        )
-                        if sent != len(packet):
-                            raise OSError(f"short UDP send: {sent} of {len(packet)} bytes")
-                    except OSError as exc:
-                        target.error = str(exc)
-                        LOGGER.error(
-                            "destination_send_failed",
-                            extra={"destination": target.endpoint.name, "detail": str(exc)},
-                        )
-                        continue
-                byte_counts[target.endpoint.name] += len(packet)
+                self._send_packet(target, packet, byte_counts)
+                target.previous_payload = bytes(frame)
             packet_count += 1
+        if poly_wire is not None:
+            time.sleep(poly_wire.end_delay_seconds)
+            self._send_poly_controls(
+                poly_wire,
+                POLY_END,
+                channel,
+                poly_wire.end_count,
+                byte_counts,
+            )
         duration = time.monotonic() - start
         return TransmitResult(
             packet_count=packet_count,

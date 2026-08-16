@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 
+from bell.wire.poly_group_page import POLY_ALERT, POLY_END, POLY_TRANSMIT
+
 
 @dataclass(frozen=True, slots=True)
 class RTPPacket:
@@ -175,6 +177,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--iface is required when capturing")
     packets, arrivals = capture(args.group, args.port, args.iface, args.count)
     for index, packet in enumerate(packets, 1):
+        if (
+            len(packet) >= 20
+            and packet[0] in {POLY_ALERT, POLY_TRANSMIT, POLY_END}
+            and 26 <= packet[1] <= 50
+            and packet[6] == 13
+        ):
+            opcode_names = {POLY_ALERT: "alert", POLY_TRANSMIT: "transmit", POLY_END: "end"}
+            detail = (
+                f" codec={packet[20]} sample_count={int.from_bytes(packet[22:26], 'big')} "
+                f"audio_bytes={len(packet) - 26}"
+                if packet[0] == POLY_TRANSMIT and len(packet) >= 26
+                else ""
+            )
+            print(
+                f"packet {index}: Poly Page {opcode_names[packet[0]]} "
+                f"group={packet[1] - 25} encoded_channel={packet[1]}{detail}"
+            )
+            continue
         parsed = parse_rtp(packet)
         print(f"packet {index}: {hexdump(packet)}")
         print(

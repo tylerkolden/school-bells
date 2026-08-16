@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bell.audio import load_frames, transcode  # noqa: E402
+from bell.audio import codec_spec, load_frames, transcode  # noqa: E402
+from bell.calibration import parse_poly_transmit  # noqa: E402
 from bell.config import ConfigLoadError, load_config  # noqa: E402
 from bell.probe import load_capture, parse_rtp  # noqa: E402
 from bell.service import clock_sync_status, interface_present  # noqa: E402
@@ -97,7 +98,7 @@ def poly_golden_check(config) -> tuple[bool, str]:
     if not PolyGroupPage(config.poly_spec).calibrated:
         return False, "persisted calibration could not be loaded"
     evidence_dir = config.state_path / "poly-calibration" / "verified" / calibration.evidence_id
-    payload_types: set[int] = set()
+    payload_type = codec_spec(calibration.codec).payload_type
     try:
         for channel in calibration.captured_channels:
             path = evidence_dir / f"channel-{channel}.bin"
@@ -105,27 +106,24 @@ def poly_golden_check(config) -> tuple[bool, str]:
             if not packets:
                 return False, f"{path.name} contains no packets"
             for packet in packets:
-                parsed = parse_rtp(packet)
-                payload_types.add(parsed.payload_type)
-                wire = PolyGroupPage(config.poly_spec, parsed.payload_type)
+                parsed = parse_poly_transmit(packet, payload_type)
+                caller_id = parsed.caller_id.rstrip(b"\0").decode("ascii")
+                wire = PolyGroupPage(config.poly_spec, parsed.codec_type, caller_id)
                 rebuilt = wire.build_packet(
-                    b"",
-                    parsed.sequence,
-                    parsed.timestamp,
-                    parsed.ssrc,
-                    parsed.marker,
+                    b"\0" * 160,
+                    0,
+                    parsed.sample_count,
+                    parsed.host_serial,
+                    False,
                     channel,
-                )
-                if rebuilt != packet:
+                )[:26]
+                if rebuilt != packet[:26]:
                     return False, f"generated channel {channel} header does not match evidence"
     except (OSError, ValueError, RuntimeError) as exc:
         return False, f"capture evidence verification failed: {exc}"
-    if len(payload_types) != 1 or not payload_types <= {0, 8, 9}:
-        return False, f"capture evidence has unsupported or mixed payload types: {sorted(payload_types)}"
-    payloads = ", ".join(str(value) for value in sorted(payload_types))
     return True, (
         f"calibrated builder matches {len(calibration.captured_channels)} live captures "
-        f"with RTP payload type {payloads}"
+        f"with Poly codec type {payload_type}"
     )
 
 

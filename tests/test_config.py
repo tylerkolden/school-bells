@@ -89,14 +89,25 @@ def test_sound_names_cannot_escape_library() -> None:
         )
 
 
-def test_poly_calibration_requires_complete_unique_evidence() -> None:
-    with pytest.raises(ValueError, match="cover every extension byte"):
+def test_poly_calibration_requires_supported_proven_layout() -> None:
+    with pytest.raises(ValueError, match="control_header_bytes"):
         PolyCalibration(
-            extension_profile_id=1,
-            extension_word_count=1,
-            mappings=[{"offset": 0, "source": "channel"}],
+            channel_bias=25,
+            control_header_bytes=21,
+            codec="g722",
             captured_channels=[23, 24, 25],
             capture_sha256=["a" * 64, "b" * 64, "c" * 64],
             captured_at="2026-08-15T12:00:00Z",
             evidence_id="20260815T120000000000Z-aaaaaaaaaaaa",
         )
+
+
+def test_poly_group_page_rejects_pcma_destination(config_tree: Path) -> None:
+    destinations = config_tree / "destinations.yaml"
+    destinations.write_text(
+        destinations.read_text(encoding="utf-8").replace("codecs: [pcmu]", "codecs: [pcma]", 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigLoadError, match="supports PCMU or G722"):
+        load_config(config_tree)

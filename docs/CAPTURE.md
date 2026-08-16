@@ -1,112 +1,79 @@
-# Deriving the Poly Group Page wire format
+# Verifying Poly Group Page on the school VLAN
 
-## Why this is required
+The Algo 8186 is configured for **Poly Group Page**, and the Yealink T31P phones send the
+Poly PTT/Page datagram format documented by Poly Engineering Advisory 70568. This is not
+RFC 3550 RTP: treating its first bytes as an RTP header produces misleading `RTPv0 PT=...`
+output.
 
-The Algo 8186 is configured in **Poly Group Page** mode. This protocol is RTP-based but adds a
-proprietary RTP header extension carrying the group/channel. Plain RTP will not select channels,
-and an invented extension can fail silently. `bell/wire/poly_group_page.py` therefore refuses to
-send until its `PolySpec` is populated from real packets.
+The production encoder remains fail-closed until controlled captures prove that the site's
+traffic follows this contract. Do not hand-author a calibration.
 
-This procedure is deliberately complete so it can be repeated years from now.
+## Proven school packet contract
 
-## Prerequisites and safety
+Live traffic from the school's Yealink at `192.168.10.198` to `239.255.255.255:601` showed:
 
-Use a **wired** laptop or Raspberry Pi on the phone VLAN (`192.168.10.0/24`). Wi-Fi multicast
-is unreliable and can yield an empty capture even while the paging source is working.
+- 20-byte control datagrams and 346-byte G.722 transmit datagrams;
+- opcode `0x0f` for alert, `0x10` for audio, and `0xff` for end;
+- a 20-byte identity header: opcode, encoded channel, 32-bit sender ID, caller-ID length,
+  and a fixed 13-byte caller-ID field;
+- a 6-byte audio header: codec type, flags, and 32-bit sample count;
+- codec type `0x09` for G.722;
+- one 160-byte frame in the first audio packet and previous+current 160-byte frames in later
+  packets (186 and 346 bytes total respectively);
+- Page group 25 encoded as channel 50. Controlled captures of three groups must prove the
+  general page mapping before activation.
 
-Before transmitting test pages, open the Algo 8186 at `192.168.10.32` and temporarily uncheck
-**Group 24**. Record that you made this change. This prevents the outdoor horn from sounding.
-Re-enable Group 24 immediately after capture.
+Poly's published contract says Page groups 1–25 are encoded as channels 26–50, so the expected
+mapping is `encoded_channel = group + 25`. The wizard derives and checks that bias from the live
+captures rather than assuming it.
 
-On a Yealink T31P, configure a DSS key as **Paging List** and ensure the list contains channels
-23 (Indoors) and 24 (Outdoors). Pick a quiet test window and notify staff nearby.
+## Guided capture on the Raspberry Pi
 
-## Recommended: guided capture on the Raspberry Pi
+1. Open **Setup → Destinations**.
+2. Configure the Pi's wired phone-VLAN address and the destination
+   `239.255.255.255:601` with **Poly Group Page** and the codec currently used by the phones.
+   The school currently uses **G.722**.
+3. Enable the transmission kill switch. Capture never disables this guard.
+4. Select **Run guided Poly capture**.
+5. Enter a known group, click **Start 10-second capture**, and immediately originate a muted
+   page on that group.
+6. Repeat for three distinct known groups (normally 23, 24, and 25).
+7. Review the candidate and explicitly confirm the group labels before activation.
 
-The web console automates capture, privacy filtering, comparison, persistence, and runtime reload:
+The listener joins only the configured multicast address, port, and wired interface. It ignores
+control and unrelated datagrams, accepts only structurally valid Poly transmit packets using the
+configured codec, discards encoded audio immediately, and stores only each 26-byte transmit
+header plus SHA-256 evidence.
 
-1. In **Setup → Safety & settings**, enable the transmission kill switch. This prevents scheduled
-   or manual bells from competing with the known external pages used for calibration.
-2. In **Setup → Destinations**, save the multicast address and UDP port that the phones use. Choose
-   **Poly Group Page**, then select **Run guided Poly capture**.
-3. Choose the enabled multicast destination and enter the exact channel you will page from a known
-   Poly/Yealink source.
-4. Select **Start 10-second capture** and immediately trigger that page. Repeat for at least three
-   distinct channels. Channels 23, 24, and 25 are the normal school defaults.
-5. The Pi accepts only RTP version 2, the destination's configured static payload type (PCMU 0,
-   PCMA 8, or G.722 9), and a consistent RTP extension layout.
-   It discards audio payloads immediately and stores only RTP headers.
-6. If exactly one full-byte channel position and constant values for every other extension byte are
-   proven across all packets, review the candidate, confirm the known-channel labels, and activate.
-7. Activation archives header-only evidence and SHA-256 hashes under
-   `state/poly-calibration/verified`, writes the derived mapping to `settings.yaml`, validates the
-   complete configuration, reloads the service, and keeps the kill switch enabled.
-8. Restore horn subscriptions, then deliberately disable the kill switch only after reviewing
-   System status and running `python scripts/acceptance.py`.
+Activation is rejected when:
 
-If capture reports that the service cannot listen on UDP port 601, update to release v0.6.1 or
-newer and restart `bell-system`. Linux reserves ports below 1024; the production unit grants only
-`CAP_NET_BIND_SERVICE` so the unprivileged `bell` process can open that configured UDP port. It does
-not grant raw-packet capture or network-administration access.
+- fewer than eight valid transmit packets remain for any group;
+- fewer than three distinct known groups were captured;
+- the capture's codec, multicast address, port, or interface differs from the active contract;
+- packet sizes, opcodes, caller-ID framing, flags, codec type, or channel range are invalid;
+- the three captures do not prove one consistent channel bias;
+- configuration changed after the review page loaded.
 
-The wizard ignores malformed, control, and unrelated multicast datagrams. It fails closed if fewer
-than eight valid configured-codec Poly RTP packets remain, or on silence, mixed layouts,
-independently changing extension bytes, an address/port/codec change after capture, or fewer than
-three known channels. It never guesses a proprietary header.
+Changing the Poly destination codec after capture makes the endpoint unhealthy until captures
+are cleared and repeated. PCMA is valid for regular RTP but is not offered for Poly Group Page;
+the published Poly format supports PCMU (`0x00`) and G.722 (`0x09`).
 
-## Manual fallback
+## Transmission behavior after verification
 
-Use this only when the guided workflow reports an unsupported or ambiguous extension layout.
+For every page, the service sends:
 
-On the wired host, install the project (the probe itself only needs Python's standard library).
-Replace `<wired-ip>` with the host's address:
+1. 31 identical alert packets at approximately 30 ms intervals;
+2. 20 ms audio frames, with the previous frame repeated before the current frame after the
+   first packet;
+3. a 50 ms end delay;
+4. 12 identical end packets at approximately 30 ms intervals.
 
-```bash
-python -m bell.probe --iface <wired-ip> --count 200 --save ch23.bin
-```
+The 32-bit sender identity is the stream's random non-zero identifier, and **Setup → Safety &
+settings → Poly caller ID** controls the fixed 1–13 ASCII-byte display name. Safety gates,
+maximum duration, kill switch, and required-destination health remain enforced.
 
-Press the Paging List key, choose **Indoors/channel 23**, and speak for five seconds. Repeat:
+## Primary references
 
-```bash
-python -m bell.probe --iface <wired-ip> --count 200 --save ch24.bin
-```
-
-Choose **Outdoors/channel 24** and speak for five seconds. The probe prints the first 48 bytes,
-parsed RTP fields, extension profile, extension word count, raw extension bytes, payload size,
-and observed packet time.
-
-Compare the first packet while ignoring sequence, timestamp, and SSRC:
-
-```bash
-python -m bell.probe --compare ch23.bin ch24.bin
-```
-
-The channel-carrying byte should change from decimal 23 to 24. Confirm the difference is inside
-the extension bytes, not voice payload. If multiple bytes change, capture again with silence and
-several channels; do not guess.
-
-## Encode a manually reviewed result
-
-In `bell/wire/poly_group_page.py`, set `SPEC` using only observed values:
-
-```python
-SPEC = PolySpec(
-    extension_profile_id=0x0000,  # replace with captured value
-    extension_word_count=1,      # replace with captured value
-    mappings=(
-        (0, "channel"),          # replace offset with captured channel byte
-        (1, 0x00),               # include every captured constant byte
-        (2, 0x00),
-        (3, 0x00),
-    ),
-)
-```
-
-The numbers above are placeholders demonstrating syntax, **not protocol values**. Do not commit
-them unchanged. Copy `ch23.bin` and `ch24.bin` into `tests/fixtures/` as golden captures. Add a
-test that builds matching packets and asserts byte-for-byte equality after masking only sequence,
-timestamp, and SSRC. The extension profile, length, marker, channel byte, constants, header size,
-and payload offset must match exactly.
-
-Run the full tests and `python scripts/acceptance.py`. Check 6 must pass. Finally, return to the
-Algo at `192.168.10.32` and **re-check Group 24**. Verify the change was restored.
+- Poly Engineering Advisory 70568, *UC Software PTT/Group Paging Audio Packet Format*:
+  <https://kaas.hpcloud.hp.com/pdf-public/pdf_9124264_en-US-1.pdf>
+- Algo multicast guide: <https://docs.algosolutions.com/docs/multicast-guide>

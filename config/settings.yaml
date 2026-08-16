@@ -3,6 +3,8 @@ settings:
   # Set this to the Raspberry Pi's wired phone-VLAN address before deployment.
   interface_ip: 192.168.10.20
   wire_format: poly_group_page
+  # Displayed as the paging source on compatible receivers (ASCII, 13 bytes maximum).
+  poly_caller_id: School Bells
   # Change to true after installing and verifying a DS3231 (or similar) RTC.
   rtc_required: false
   endpoint_check_interval_seconds: 60

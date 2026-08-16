@@ -7,9 +7,10 @@
 - Python 3.11+, standard library preferred. Third-party dependencies must be justified. Approved project dependencies are Pydantic v2, APScheduler, FastAPI, Uvicorn, Jinja2, PyYAML, ruamel.yaml, and pytest/test tooling.
 - The default receivers use `239.255.255.255:601` but can be modified. The zone is identified by a Poly group/channel number: 23 Indoors, 24 Outdoors, 25 Everywhere but can also be modified.
 - The Algo 8186 uses **Poly Group Page**, not Regular RTP. Its channel header layout must come from a live capture. Never infer or invent it. An uncalibrated Poly transmitter must raise.
-- Multicast audio uses exactly one configured static RTP codec per destination: PCMU payload type
-  0, PCMA payload type 8, or G.722 payload type 9. Frames are 20 ms/160 bytes. G.722 audio is
-  encoded at 16 kHz but uses the RFC 3551-mandated 8 kHz RTP clock.
+- Multicast audio uses exactly one configured codec per destination. Regular RTP supports PCMU
+  payload type 0, PCMA payload type 8, or G.722 payload type 9. Poly Group Page supports its
+  published PCMU type 0 or G.722 type 9, not PCMA. Frames are 20 ms/160 bytes. G.722 audio is
+  encoded at 16 kHz but uses an 8 kHz sample-count clock.
 - All scheduling uses `America/Denver` local wall-clock time. DST must not shift bell times.
 - Safety guards are mandatory and may not be bypassed for convenience.
 

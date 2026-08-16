@@ -19,6 +19,7 @@ class WireFormat(Protocol):
         ssrc: int,
         marker: bool,
         channel: int,
+        previous_payload: bytes | None = None,
     ) -> bytes: ...
 
 

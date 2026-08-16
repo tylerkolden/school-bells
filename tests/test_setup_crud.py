@@ -410,6 +410,7 @@ def test_settings_update_and_stale_write_protection(config_tree: Path) -> None:
         **auth,
         "interface_ip": "127.0.0.1",
         "wire_format": "plain_rtp",
+        "poly_caller_id": "School Bells",
         "endpoint_check_interval_seconds": "30",
         "api_rate_limit_per_minute": "20",
         "clock_sync_required": "on",

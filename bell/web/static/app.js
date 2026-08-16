@@ -199,6 +199,7 @@ document.querySelectorAll("[data-destination-fields]").forEach((container) => {
   const calibrationCallout = container.querySelector("[data-poly-calibration-callout]");
   const codecField = container.querySelector("[data-codec-field]");
   const codecLabel = container.querySelector("[data-codec-label]");
+  const codecHelp = container.querySelector("[data-codec-help]");
   const codecOptions = [...container.querySelectorAll("[data-codec-option]")];
   const normalizeMulticastCodecs = (changed) => {
     if (selector.value !== "multicast") return;
@@ -207,6 +208,7 @@ document.querySelectorAll("[data-destination-fields]").forEach((container) => {
     if (!selected && codecOptions.length) codecOptions[0].checked = true;
   };
   const refreshProtocol = () => {
+    const usesPoly = selector.value === "multicast" && wireFormat?.value === "poly_group_page";
     container.querySelectorAll("[data-protocol-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.protocolPanel !== selector.value;
     });
@@ -228,6 +230,16 @@ document.querySelectorAll("[data-destination-fields]").forEach((container) => {
     if (codecField) codecField.hidden = selector.value === "http";
     if (codecLabel) {
       codecLabel.textContent = selector.value === "multicast" ? "Multicast codec (choose one)" : "SIP codec preference";
+    }
+    codecOptions.forEach((option) => {
+      const unsupported = usesPoly && option.value === "pcma";
+      option.disabled = unsupported;
+      if (unsupported) option.checked = false;
+    });
+    if (codecHelp) {
+      codecHelp.textContent = usesPoly
+        ? "Poly Group Page supports PCMU or G722. Choose the codec configured on the phones and speakers."
+        : "Multicast uses exactly one codec and must match the receivers. SIP may offer multiple codecs.";
     }
     normalizeMulticastCodecs();
   };
