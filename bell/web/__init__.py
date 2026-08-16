@@ -947,7 +947,6 @@ def create_app(
             extra={
                 "action": "poly_capture",
                 "target": "multicast_destination",
-                "channel": known_channel,
                 "packets": len(headers),
                 "result": "captured_headers_only",
             },
