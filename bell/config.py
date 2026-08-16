@@ -91,6 +91,12 @@ class Destination(BaseModel):
             raise ValueError("multicast destinations require group")
         if self.protocol == "multicast" and len(self.codecs) != 1:
             raise ValueError("multicast destinations require exactly one codec")
+        if (
+            self.protocol == "multicast"
+            and self.wire_format == "poly_group_page"
+            and self.codecs == ["pcma"]
+        ):
+            raise ValueError("Poly Group Page supports PCMU or G722, not PCMA")
         if self.protocol == "sip":
             if not self.sip_uri or not self.sip_uri.lower().startswith(("sip:", "sips:")):
                 raise ValueError("SIP destinations require a sip: or sips: sip_uri")
@@ -218,24 +224,13 @@ class Safety(BaseModel):
     kill_switch_until: date | None = None
 
 
-class PolyMapping(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    offset: int = Field(ge=0, le=262139)
-    source: Literal["channel"] | int
-
-    @field_validator("source")
-    @classmethod
-    def source_fits_byte(cls, value: str | int) -> str | int:
-        if isinstance(value, int) and not 0 <= value <= 0xFF:
-            raise ValueError("constant source must fit in one byte")
-        return value
-
-
 class PolyCalibration(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    extension_profile_id: int = Field(ge=0, le=0xFFFF)
-    extension_word_count: int = Field(ge=1, le=0xFFFF)
-    mappings: list[PolyMapping]
+    protocol: Literal["poly_page_v1"] = "poly_page_v1"
+    channel_bias: Literal[25]
+    control_header_bytes: Literal[20] = 20
+    audio_header_bytes: Literal[6] = 6
+    codec: Literal["pcmu", "g722"]
     captured_channels: list[int] = Field(min_length=3)
     capture_sha256: list[str] = Field(min_length=3)
     captured_at: datetime
@@ -243,12 +238,6 @@ class PolyCalibration(BaseModel):
 
     @model_validator(mode="after")
     def complete_proven_layout(self) -> PolyCalibration:
-        extension_size = self.extension_word_count * 4
-        offsets = [item.offset for item in self.mappings]
-        if sorted(offsets) != list(range(extension_size)):
-            raise ValueError("mappings must cover every extension byte exactly once")
-        if sum(item.source == "channel" for item in self.mappings) != 1:
-            raise ValueError("mappings must contain exactly one channel byte")
         if len(self.captured_channels) != len(set(self.captured_channels)):
             raise ValueError("captured_channels must be unique")
         if any(not 1 <= channel <= 25 for channel in self.captured_channels):
@@ -272,6 +261,7 @@ class Settings(BaseModel):
     max_audio_seconds: float = Field(default=30.0, ge=0.25, le=600.0)
     max_page_seconds: float = Field(default=120.0, ge=1.0, le=1800.0)
     poly_group_page_calibration: PolyCalibration | None = None
+    poly_caller_id: str = Field(default="School Bells", min_length=1, max_length=13)
     sounds_dir: Path = Path("sounds")
     state_dir: Path = Path("state")
     log_dir: Path = Path("logs")
@@ -291,6 +281,15 @@ class Settings(BaseModel):
         address = ipaddress.ip_address(value)
         if address.version != 4:
             raise ValueError("must be an IPv4 address")
+        return value
+
+    @field_validator("poly_caller_id")
+    @classmethod
+    def poly_caller_id_is_ascii(cls, value: str) -> str:
+        try:
+            value.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("must contain ASCII characters only") from exc
         return value
 
     @field_validator("wire_format")
@@ -336,9 +335,9 @@ class BellConfig(BaseModel):
         from bell.wire.poly_group_page import PolySpec
 
         return PolySpec(
-            calibration.extension_profile_id,
-            calibration.extension_word_count,
-            tuple((item.offset, item.source) for item in calibration.mappings),
+            calibration.channel_bias,
+            calibration.control_header_bytes,
+            calibration.audio_header_bytes,
         )
 
     @property
@@ -441,6 +440,16 @@ def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
         known = [destinations[name] for name in zone.destinations if name in destinations]
         if known and not any(item.enabled for item in known):
             errors.append(f"zone {zone.name!r} has no enabled destinations")
+    for destination in config.destinations:
+        effective_wire = destination.wire_format or config.settings.wire_format
+        if (
+            destination.protocol == "multicast"
+            and effective_wire == "poly_group_page"
+            and destination.codecs == ["pcma"]
+        ):
+            errors.append(
+                f"destination {destination.name!r}: Poly Group Page supports PCMU or G722, not PCMA"
+            )
     all_events: list[tuple[str, BellEvent]] = []
     for schedule in config.schedules:
         all_events.extend((f"schedule {schedule.name!r}", event) for event in schedule.events)

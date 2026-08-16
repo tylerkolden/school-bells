@@ -48,7 +48,7 @@ safety features, and repeated live tests disrupt the whole building.
 
 Confirm the event uses channel 24 or 25; channel 23 is intentionally phones-only. Verify the Algo
 is in Poly Group Page Receiver mode and subscribed to the exact group. A channel or calibrated
-Poly-extension mismatch can let phones behave differently from the horn. Re-run the golden capture
+Poly framing or codec mismatch can let phones behave differently from the horn. Re-run the golden capture
 test and inspect the Algo Group 24 checkbox, especially after the capture procedure.
 
 ## Everything rings an hour off

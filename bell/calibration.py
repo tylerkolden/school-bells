@@ -1,4 +1,4 @@
-"""Strict derivation of a Poly Group Page header from known live channel captures."""
+"""Strict validation of Poly Group Page framing from known live captures."""
 
 from __future__ import annotations
 
@@ -7,16 +7,35 @@ import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from bell.probe import RTPPacket, parse_rtp
-from bell.wire.poly_group_page import PolyGroupPage, PolySpec
+from bell.wire.poly_group_page import (
+    POLY_AUDIO_HEADER_BYTES,
+    POLY_CALLER_ID_BYTES,
+    POLY_CODEC_TYPES,
+    POLY_CONTROL_HEADER_BYTES,
+    POLY_TRANSMIT,
+    PolyGroupPage,
+    PolySpec,
+)
 
 MIN_CHANNEL_CAPTURES = 3
 MIN_PACKETS_PER_CHANNEL = 8
-STATIC_AUDIO_PAYLOAD_TYPES = {0: "PCMU", 8: "PCMA", 9: "G722"}
 
 
 class CalibrationError(ValueError):
     """Raised when captures cannot prove one unambiguous supported Poly layout."""
+
+
+@dataclass(frozen=True, slots=True)
+class PolyPacket:
+    opcode: int
+    encoded_channel: int
+    host_serial: int
+    caller_id_length: int
+    caller_id: bytes
+    codec_type: int
+    flags: int
+    sample_count: int
+    audio: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,32 +51,60 @@ class DerivedCalibration:
     evidence: tuple[CaptureEvidence, ...]
 
 
-def header_only(packet: bytes, expected_payload_type: int = 0) -> bytes:
-    """Validate a captured packet and discard its audio payload immediately."""
-    try:
-        parsed = parse_rtp(packet)
-    except ValueError as exc:
-        raise CalibrationError(f"capture is not a complete RTP packet: {exc}") from exc
-    if parsed.version != 2:
-        raise CalibrationError("capture is not RTP version 2")
-    codec = STATIC_AUDIO_PAYLOAD_TYPES.get(expected_payload_type)
+def parse_poly_transmit(packet: bytes, expected_payload_type: int = 0) -> PolyPacket:
+    """Parse one Poly transmit packet or sanitized 26-byte transmit header."""
+    codec = POLY_CODEC_TYPES.get(expected_payload_type)
     if codec is None:
-        raise CalibrationError(f"unsupported calibration RTP payload type {expected_payload_type}")
-    if parsed.payload_type != expected_payload_type:
         raise CalibrationError(
-            f"capture is not configured {codec} RTP payload type {expected_payload_type}"
+            f"Poly Group Page does not support payload type {expected_payload_type}"
         )
-    if parsed.padding or parsed.csrc_count:
-        raise CalibrationError("capture uses unsupported RTP padding or CSRC fields")
-    if not parsed.extension or parsed.extension_profile is None or parsed.extension_words is None:
-        raise CalibrationError("capture has no RTP header extension")
-    if parsed.extension_words < 1:
-        raise CalibrationError("capture has an empty RTP header extension")
-    return bytes(packet[: parsed.header_length])
+    minimum = POLY_CONTROL_HEADER_BYTES + POLY_AUDIO_HEADER_BYTES
+    if len(packet) < minimum:
+        raise CalibrationError(f"capture is shorter than the {minimum}-byte Poly audio header")
+    opcode, channel, host_serial, caller_length, caller_id = struct.unpack_from(
+        "!BBIB13s", packet
+    )
+    if opcode != POLY_TRANSMIT:
+        raise CalibrationError("capture is not a Poly transmit packet")
+    if not 26 <= channel <= 50:
+        raise CalibrationError("capture does not use a Poly paging channel from 26 through 50")
+    if caller_length != POLY_CALLER_ID_BYTES:
+        raise CalibrationError("capture does not use the fixed 13-byte Poly caller ID")
+    codec_type, flags, sample_count = struct.unpack_from("!BBI", packet, 20)
+    if codec_type != expected_payload_type:
+        raise CalibrationError(
+            f"capture is not configured Poly {codec} codec type {expected_payload_type}"
+        )
+    if flags != 0:
+        raise CalibrationError("capture uses unsupported Poly audio flags")
+    audio = bytes(packet[minimum:])
+    if audio and len(audio) not in {160, 320}:
+        raise CalibrationError(
+            "Poly audio payload must contain one or two 160-byte/20 ms frames"
+        )
+    return PolyPacket(
+        opcode,
+        channel,
+        host_serial,
+        caller_length,
+        caller_id,
+        codec_type,
+        flags,
+        sample_count,
+        audio,
+    )
+
+
+def header_only(packet: bytes, expected_payload_type: int = 0) -> bytes:
+    """Validate a live Poly audio packet and discard its audio immediately."""
+    parsed = parse_poly_transmit(packet, expected_payload_type)
+    if not parsed.audio:
+        raise CalibrationError("capture contains a header without live audio evidence")
+    return bytes(packet[: POLY_CONTROL_HEADER_BYTES + POLY_AUDIO_HEADER_BYTES])
 
 
 def valid_header_or_none(packet: bytes, expected_payload_type: int = 0) -> bytes | None:
-    """Discard unrelated traffic and return only a validated RTP header."""
+    """Discard unrelated datagrams and return only a validated Poly audio header."""
     try:
         return header_only(packet, expected_payload_type)
     except CalibrationError:
@@ -67,9 +114,11 @@ def valid_header_or_none(packet: bytes, expected_payload_type: int = 0) -> bytes
 def sanitize_capture(
     packets: Sequence[bytes], expected_payload_type: int = 0
 ) -> list[bytes]:
-    """Return valid header-only packets while ignoring unrelated multicast traffic."""
-    if expected_payload_type not in STATIC_AUDIO_PAYLOAD_TYPES:
-        raise CalibrationError(f"unsupported calibration RTP payload type {expected_payload_type}")
+    """Return validated, header-only Poly transmit packets."""
+    if expected_payload_type not in POLY_CODEC_TYPES:
+        raise CalibrationError(
+            f"Poly Group Page does not support payload type {expected_payload_type}"
+        )
     if len(packets) < MIN_PACKETS_PER_CHANNEL:
         raise CalibrationError(
             f"capture needs at least {MIN_PACKETS_PER_CHANNEL} packets; received {len(packets)}"
@@ -78,14 +127,17 @@ def sanitize_capture(
     rejected: list[str] = []
     for packet in packets:
         try:
-            headers.append(header_only(packet, expected_payload_type))
+            parsed = parse_poly_transmit(packet, expected_payload_type)
+            headers.append(bytes(packet[:26]))
+            if parsed.audio:
+                headers[-1] = header_only(packet, expected_payload_type)
         except CalibrationError as exc:
             rejected.append(str(exc))
     if len(headers) < MIN_PACKETS_PER_CHANNEL:
         detail = f" Last rejected packet: {rejected[-1]}" if rejected else ""
         raise CalibrationError(
             f"capture needs at least {MIN_PACKETS_PER_CHANNEL} valid Poly "
-            f"{STATIC_AUDIO_PAYLOAD_TYPES[expected_payload_type]} RTP packets; "
+            f"{POLY_CODEC_TYPES[expected_payload_type]} transmit packets; "
             f"accepted {len(headers)} of {len(packets)}.{detail}"
         )
     return headers
@@ -94,7 +146,7 @@ def sanitize_capture(
 def derive_poly_calibration(
     captures: Mapping[int, Sequence[bytes]], expected_payload_type: int = 0
 ) -> DerivedCalibration:
-    """Derive a spec only when three known channels prove one exact byte mapping."""
+    """Derive the page-channel bias only when three known channels prove it."""
     if len(captures) < MIN_CHANNEL_CAPTURES:
         raise CalibrationError(
             f"capture at least {MIN_CHANNEL_CAPTURES} distinct known Poly channels"
@@ -103,21 +155,17 @@ def derive_poly_calibration(
     if any(not 1 <= channel <= 25 for channel in channels):
         raise CalibrationError("known Poly channels must be between 1 and 25")
 
-    parsed_by_channel: dict[int, list[RTPPacket]] = {}
     evidence: list[CaptureEvidence] = []
-    profile: int | None = None
-    words: int | None = None
+    biases: set[int] = set()
+    parsed_by_channel: dict[int, list[PolyPacket]] = {}
     for channel in channels:
         headers = sanitize_capture(captures[channel], expected_payload_type)
-        parsed_packets = [parse_rtp(packet) for packet in headers]
-        identities = {(packet.extension_profile, packet.extension_words) for packet in parsed_packets}
-        if len(identities) != 1:
-            raise CalibrationError(f"channel {channel} contains mixed RTP extension layouts")
-        current_profile, current_words = identities.pop()
-        if profile is None:
-            profile, words = current_profile, current_words
-        elif (current_profile, current_words) != (profile, words):
-            raise CalibrationError("known channels use different RTP extension layouts")
+        parsed_packets = [parse_poly_transmit(packet, expected_payload_type) for packet in headers]
+        encoded_channels = {packet.encoded_channel for packet in parsed_packets}
+        if len(encoded_channels) != 1:
+            raise CalibrationError(f"channel {channel} capture contains mixed Poly channels")
+        encoded_channel = encoded_channels.pop()
+        biases.add(encoded_channel - channel)
         parsed_by_channel[channel] = parsed_packets
         digest = hashlib.sha256()
         for header in headers:
@@ -125,71 +173,45 @@ def derive_poly_calibration(
             digest.update(header)
         evidence.append(CaptureEvidence(channel, len(headers), digest.hexdigest()))
 
-    assert profile is not None and words is not None
-    extension_size = words * 4
-    candidates: list[int] = []
-    for offset in range(extension_size):
-        if all(
-            {packet.extension_data[offset] for packet in parsed_by_channel[channel]}
-            == {channel}
-            for channel in channels
-        ):
-            candidates.append(offset)
-    if len(candidates) != 1:
+    if len(biases) != 1:
         raise CalibrationError(
-            "captures do not prove exactly one full-byte channel position; "
-            "repeat with clean traffic on three distinct channels"
+            "known captures do not prove one consistent Poly paging-channel mapping"
         )
-    channel_offset = candidates[0]
+    channel_bias = biases.pop()
+    try:
+        spec = PolySpec(channel_bias)
+    except ValueError as exc:
+        raise CalibrationError(
+            "captures do not confirm the required Poly Page group-to-channel +25 mapping"
+        ) from exc
 
-    mappings: list[tuple[int, str | int]] = []
-    for offset in range(extension_size):
-        if offset == channel_offset:
-            mappings.append((offset, "channel"))
-            continue
-        values = {
-            packet.extension_data[offset]
-            for parsed_packets in parsed_by_channel.values()
-            for packet in parsed_packets
-        }
-        if len(values) != 1:
-            raise CalibrationError(
-                f"extension byte {offset} changes independently of the known channel; "
-                "this layout requires manual protocol review"
-            )
-        mappings.append((offset, values.pop()))
-
-    spec = PolySpec(profile, words, tuple(mappings))
-    wire = PolyGroupPage(spec, expected_payload_type)
     for channel, packets in parsed_by_channel.items():
         for packet in packets:
-            rebuilt = wire.build_packet(
-                b"",
-                packet.sequence,
-                packet.timestamp,
-                packet.ssrc,
-                packet.marker,
-                channel,
+            try:
+                caller_id = packet.caller_id.rstrip(b"\0").decode("ascii", "strict")
+                rebuilt = PolyGroupPage(spec, packet.codec_type, caller_id).build_packet(
+                    b"\0" * 160,
+                    0,
+                    packet.sample_count,
+                    packet.host_serial,
+                    False,
+                    channel,
+                )[:26]
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise CalibrationError(
+                    "captured Poly caller ID must contain 1 to 13 ASCII bytes"
+                ) from exc
+            expected = (
+                struct.pack(
+                    "!BBIB13s",
+                    packet.opcode,
+                    packet.encoded_channel,
+                    packet.host_serial,
+                    packet.caller_id_length,
+                    packet.caller_id,
+                )
+                + struct.pack("!BBI", packet.codec_type, packet.flags, packet.sample_count)
             )
-            if rebuilt != packet_to_header(packet):
-                raise CalibrationError("derived header does not reproduce every captured RTP header")
+            if rebuilt != expected:
+                raise CalibrationError("derived Poly builder does not reproduce captured headers")
     return DerivedCalibration(spec, tuple(evidence))
-
-
-def packet_to_header(packet: RTPPacket) -> bytes:
-    """Recreate the exact captured RTP header for proof comparison."""
-    first = 0x80 | 0x10
-    second = (0x80 if packet.marker else 0) | packet.payload_type
-
-    return (
-        struct.pack(
-            "!BBHII",
-            first,
-            second,
-            packet.sequence,
-            packet.timestamp,
-            packet.ssrc,
-        )
-        + struct.pack("!HH", packet.extension_profile, packet.extension_words)
-        + packet.extension_data
-    )

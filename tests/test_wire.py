@@ -7,7 +7,13 @@ import pytest
 from bell.wire import get_wire_format
 from bell.wire.base import StreamState
 from bell.wire.plain_rtp import PlainRTP
-from bell.wire.poly_group_page import PolyFormatNotCalibrated, PolyGroupPage, PolySpec
+from bell.wire.poly_group_page import (
+    POLY_ALERT,
+    POLY_END,
+    PolyFormatNotCalibrated,
+    PolyGroupPage,
+    PolySpec,
+)
 
 
 def test_plain_rtp_exact_bytes() -> None:
@@ -40,22 +46,42 @@ def test_stream_state_uses_configured_rtp_clock_step() -> None:
 
 def test_poly_refuses_uncalibrated_output() -> None:
     with pytest.raises(PolyFormatNotCalibrated, match="CAPTURE"):
-        get_wire_format("poly_group_page").build_packet(b"\0" * 160, 1, 160, 1, True, 23)
+        get_wire_format("poly_group_page").build_packet(
+            b"\0" * 160, 1, 160, 1, True, 23
+        )
 
 
-def test_poly_table_builder_with_explicit_test_spec() -> None:
-    spec = PolySpec(0xABCD, 1, ((0, 0x44), (1, "channel"), (2, 0x55)))
-    packet = PolyGroupPage(spec).build_packet(b"payload", 1, 160, 2, False, 24)
-    assert packet[:12] == struct.pack("!BBHII", 0x90, 0, 1, 160, 2)
-    assert packet[12:20] == bytes.fromhex("ab cd 00 01 44 18 55 00")
-    assert packet[20:] == b"payload"
-
-
-def test_poly_table_builder_uses_selected_static_payload_type() -> None:
-    spec = PolySpec(0xABCD, 1, ((0, 0x44), (1, "channel"), (2, 0x55)))
-    packet = PolyGroupPage(spec, payload_type=9).build_packet(
-        b"g722", 1, 160, 2, False, 25
+def test_poly_builds_exact_live_observed_g722_packets() -> None:
+    wire = PolyGroupPage(PolySpec(25), payload_type=9, caller_id="School Bells")
+    alert = wire.build_control_packet(POLY_ALERT, 25, 0x8899AABB)
+    ended = wire.build_control_packet(POLY_END, 25, 0x8899AABB)
+    first = wire.build_packet(b"a" * 160, 1, 160, 0x8899AABB, True, 25)
+    second = wire.build_packet(
+        b"b" * 160, 2, 320, 0x8899AABB, False, 25, b"a" * 160
     )
 
-    assert packet[1] & 0x7F == 9
-    assert packet[17] == 25
+    identity = struct.pack("!BBIB13s", 0x10, 50, 0x8899AABB, 13, b"School Bells\0\0")
+    assert alert == bytes((0x0F, 50)) + identity[2:]
+    assert ended == bytes((0xFF, 50)) + identity[2:]
+    assert first == identity + struct.pack("!BBI", 9, 0, 160) + b"a" * 160
+    assert second == (
+        identity + struct.pack("!BBI", 9, 0, 320) + b"a" * 160 + b"b" * 160
+    )
+    assert len(alert) == 20
+    assert len(first) == 186
+    assert len(second) == 346
+
+
+def test_poly_rejects_unpublished_pcma_codec() -> None:
+    with pytest.raises(ValueError, match=r"PCMU.*G722"):
+        PolyGroupPage(PolySpec(25), payload_type=8)
+
+
+def test_poly_validates_channel_frame_and_caller_id() -> None:
+    wire = PolyGroupPage(PolySpec(25))
+    with pytest.raises(ValueError, match="between 1 and 25"):
+        wire.build_control_packet(POLY_ALERT, 0, 1)
+    with pytest.raises(ValueError, match="160-byte"):
+        wire.build_packet(b"short", 1, 1, 1, False, 23)
+    with pytest.raises(ValueError, match="1 to 13"):
+        PolyGroupPage(PolySpec(25), caller_id="caller id is too long")

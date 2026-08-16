@@ -1,60 +1,82 @@
-"""Fail-closed Poly Group Page RTP extension builder.
+"""Poly Group Page packet construction proven by live Yealink traffic.
 
-Live traffic establishes that Poly/Yealink group paging is RTP-based with the RTP X bit set.
-The paging channel (1-25) is carried somewhere in the RTP header extension, and compatible
-receivers filter on that value; channel 0 means "any third-party device" in receiver settings.
-The exact extension profile and byte layout are proprietary and must be derived from a packet
-capture. This module deliberately ships without a speculative default. See ``docs/CAPTURE.md``.
-
-Once captured, populate ``SPEC`` with the observed profile, extension length, and byte mappings.
-Mappings are ``(offset, source)`` pairs where source is ``"channel"`` or an integer constant.
-Offsets address the extension data immediately after the four-byte RTP extension header.
+The on-wire format is the 20-byte Poly PTT/Page header documented in Engineering
+Advisory 70568, followed (for transmit packets) by a six-byte audio header and one
+or two codec frames. A calibration is still required before transmission: it
+proves that the site's receivers use this format and its paging-channel bias.
 """
 
 from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import Literal
 
 
 class PolyFormatNotCalibrated(RuntimeError):
-    """Raised rather than emitting an invented Poly header."""
+    """Raised rather than emitting Poly packets without site evidence."""
 
 
-MappingSource = Literal["channel"] | int
+POLY_ALERT = 0x0F
+POLY_TRANSMIT = 0x10
+POLY_END = 0xFF
+POLY_CALLER_ID_BYTES = 13
+POLY_CONTROL_HEADER_BYTES = 20
+POLY_AUDIO_HEADER_BYTES = 6
+POLY_CODEC_TYPES = {0: "PCMU", 9: "G722"}
 
 
 @dataclass(frozen=True, slots=True)
 class PolySpec:
-    extension_profile_id: int
-    extension_word_count: int
-    mappings: tuple[tuple[int, MappingSource], ...]
+    """The site-specific relationship proven by controlled live captures."""
+
+    channel_bias: int
+    control_header_bytes: int = POLY_CONTROL_HEADER_BYTES
+    audio_header_bytes: int = POLY_AUDIO_HEADER_BYTES
 
     def __post_init__(self) -> None:
-        if not 0 <= self.extension_profile_id <= 0xFFFF:
-            raise ValueError("extension_profile_id must fit in 16 bits")
-        if not 1 <= self.extension_word_count <= 0xFFFF:
-            raise ValueError("extension_word_count must be positive")
-        extension_size = self.extension_word_count * 4
-        for offset, source in self.mappings:
-            if not 0 <= offset < extension_size:
-                raise ValueError(f"mapping offset {offset} is outside extension data")
-            if source != "channel" and not isinstance(source, int):
-                raise ValueError(f"invalid mapping source {source!r}")
-            if isinstance(source, int) and not 0 <= source <= 0xFF:
-                raise ValueError("constant mapping bytes must fit in one byte")
+        if self.channel_bias != 25:
+            raise ValueError("Poly Page groups must use the verified +25 channel bias")
+        if self.control_header_bytes != POLY_CONTROL_HEADER_BYTES:
+            raise ValueError("unsupported Poly control-header size")
+        if self.audio_header_bytes != POLY_AUDIO_HEADER_BYTES:
+            raise ValueError("unsupported Poly audio-header size")
 
 
 SPEC: PolySpec | None = None
 
 
+def _caller_id_field(caller_id: str) -> bytes:
+    try:
+        encoded = caller_id.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Poly caller ID must contain ASCII characters only") from exc
+    if not encoded or len(encoded) > POLY_CALLER_ID_BYTES:
+        raise ValueError("Poly caller ID must contain 1 to 13 ASCII bytes")
+    return encoded.ljust(POLY_CALLER_ID_BYTES, b"\0")
+
+
 class PolyGroupPage:
-    def __init__(self, spec: PolySpec | None = None, payload_type: int = 0) -> None:
-        if not 0 <= payload_type <= 127:
-            raise ValueError("payload_type must fit in 7 bits")
+    alert_count = 31
+    end_count = 12
+    control_interval_seconds = 0.030
+    end_delay_seconds = 0.050
+    session_overhead_seconds = (
+        alert_count * control_interval_seconds
+        + end_delay_seconds
+        + end_count * control_interval_seconds
+    )
+
+    def __init__(
+        self,
+        spec: PolySpec | None = None,
+        payload_type: int = 0,
+        caller_id: str = "School Bells",
+    ) -> None:
+        if payload_type not in POLY_CODEC_TYPES:
+            raise ValueError("Poly Group Page supports only PCMU (0) or G722 (9)")
         self.spec = SPEC if spec is None else spec
         self.payload_type = payload_type
+        self.caller_id = _caller_id_field(caller_id)
 
     @property
     def name(self) -> str:
@@ -64,6 +86,30 @@ class PolyGroupPage:
     def calibrated(self) -> bool:
         return self.spec is not None
 
+    def _identity_header(self, opcode: int, channel: int, host_serial: int) -> bytes:
+        if self.spec is None:
+            raise PolyFormatNotCalibrated(
+                "Poly wire format not yet verified by capture — see docs/CAPTURE.md"
+            )
+        if not 1 <= channel <= 25:
+            raise ValueError("Poly Group Page channel must be between 1 and 25")
+        encoded_channel = channel + self.spec.channel_bias
+        if encoded_channel > 0xFF:
+            raise ValueError("calibrated Poly channel mapping exceeds one byte")
+        return struct.pack(
+            "!BBIB13s",
+            opcode,
+            encoded_channel,
+            host_serial & 0xFFFFFFFF,
+            POLY_CALLER_ID_BYTES,
+            self.caller_id,
+        )
+
+    def build_control_packet(self, opcode: int, channel: int, host_serial: int) -> bytes:
+        if opcode not in {POLY_ALERT, POLY_END}:
+            raise ValueError("Poly control opcode must be alert or end")
+        return self._identity_header(opcode, channel, host_serial)
+
     def build_packet(
         self,
         payload: bytes,
@@ -72,21 +118,19 @@ class PolyGroupPage:
         ssrc: int,
         marker: bool,
         channel: int,
+        previous_payload: bytes | None = None,
     ) -> bytes:
-        if self.spec is None:
-            raise PolyFormatNotCalibrated(
-                "Poly wire format not yet derived from capture — see docs/CAPTURE.md"
-            )
-        if not 1 <= channel <= 25:
-            raise ValueError("Poly Group Page channel must be between 1 and 25")
-        second = (0x80 if marker else 0) | self.payload_type
-        rtp = struct.pack(
-            "!BBHII", 0x90, second, seq & 0xFFFF, timestamp & 0xFFFFFFFF, ssrc & 0xFFFFFFFF
+        del seq, marker
+        current = bytes(payload)
+        if len(current) != 160:
+            raise ValueError("Poly Group Page requires 160-byte/20 ms codec frames")
+        if previous_payload is not None and len(previous_payload) != len(current):
+            raise ValueError("Poly redundant frame must match the current frame size")
+        audio_header = struct.pack("!BBI", self.payload_type, 0, timestamp & 0xFFFFFFFF)
+        redundant = b"" if previous_payload is None else bytes(previous_payload)
+        return (
+            self._identity_header(POLY_TRANSMIT, channel, ssrc)
+            + audio_header
+            + redundant
+            + current
         )
-        extension = bytearray(self.spec.extension_word_count * 4)
-        for offset, source in self.spec.mappings:
-            extension[offset] = channel if source == "channel" else source
-        ext_header = struct.pack(
-            "!HH", self.spec.extension_profile_id, self.spec.extension_word_count
-        )
-        return rtp + ext_header + extension + bytes(payload)

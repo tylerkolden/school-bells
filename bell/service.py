@@ -34,6 +34,7 @@ from bell.monitor import EndpointMonitor, EndpointRegistry
 from bell.paging import PageCoordinator
 from bell.scheduler import BellScheduler
 from bell.systemd import notify, watchdog_interval
+from bell.wire.poly_group_page import PolyGroupPage
 
 LOGGER = logging.getLogger(__name__)
 
@@ -271,6 +272,19 @@ class ServiceRuntime:
                 + main_duration * event.repeat_count
                 + event.repeat_interval_seconds * max(0, event.repeat_count - 1)
             )
+            uses_poly = any(
+                destination.enabled
+                and destination.protocol == "multicast"
+                and (destination.wire_format or config.settings.wire_format)
+                == "poly_group_page"
+                for name in zone.destinations
+                if (destination := config.destination_map.get(name)) is not None
+            )
+            if uses_poly:
+                transmission_count = event.repeat_count + int(event.pre_tone is not None)
+                total_duration += (
+                    PolyGroupPage.session_overhead_seconds * transmission_count
+                )
             if total_duration > config.settings.max_page_seconds:
                 raise PageDeliveryError(
                     f"page duration {total_duration:.2f}s exceeds max_page_seconds "

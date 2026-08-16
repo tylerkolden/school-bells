@@ -1,13 +1,13 @@
 # School Bell System
 
 This project runs a scheduled, fail-safe multicast paging transmitter for a Catholic K–12
-school. A Raspberry Pi sends configured standards-based RTP audio to Yealink T31P phones and an
-Algo 8186 horn.
+school. A Raspberry Pi sends configured regular RTP or verified Poly Group Page audio to Yealink
+T31P phones and an Algo 8186 horn.
 It schedules in local wall-clock time, records every fire attempt in SQLite, refuses late or
 duplicate bells, and exposes a simple front-office UI.
 
-> **Deployment gate:** Poly Group Page's proprietary RTP extension is intentionally
-> uncalibrated. The system will not transmit a guessed header. Complete
+> **Deployment gate:** Poly Group Page is intentionally uncalibrated until the site's packet
+> contract is verified. The system will not transmit without live evidence. Complete
 > the guided **Setup → Run guided Poly capture** workflow on the Raspberry Pi before live use.
 > See [the capture procedure](docs/CAPTURE.md) for preparation and the manual fallback.
 
@@ -23,11 +23,11 @@ channel is the zone selector.
 | 24 | Outdoors | yes | yes | recess and dismissal |
 | 25 | Everywhere | yes | yes | emergency and all-call |
 
-The Poly/Yealink multicast path defaults to PCMU (G.711 μ-law), 8 kHz mono, RTP payload type 0,
-in 20 ms/160-byte frames. Supported RTP codecs are PCMU, PCMA (G.711 A-law), and G.722 wideband.
-SIP uses an ordered preference list; every multicast destination uses exactly one codec selected
-to match its receivers. G.722 uses static payload type 9, 16 kHz audio, and the RFC 3551-required
-8 kHz RTP clock. All supported multicast codecs use 20 ms/160-byte payloads.
+Regular RTP supports PCMU, PCMA (G.711 A-law), and G.722 wideband. Poly Group Page supports the
+published PCMU (`0x00`) and G.722 (`0x09`) codec types and wraps 20 ms/160-byte frames with Poly
+session headers and previous-frame redundancy. SIP uses an ordered preference list; every
+multicast destination uses exactly one codec selected to match its receivers. The school's live
+Yealink capture uses G.722. G.722 is encoded at 16 kHz but uses an 8 kHz sample-count clock.
 
 ## Architecture
 

@@ -7,23 +7,17 @@ from pathlib import Path
 import pytest
 
 import bell.delivery as delivery_module
-from bell.config import PolyCalibration, PolyMapping, load_config
+from bell.config import PolyCalibration, load_config
 from bell.delivery import DeliveryManager, PageDeliveryError
 from bell.monitor import EndpointRegistry
 from bell.protocols.base import DeliveryOutcome
 from bell.transmit import TransmitResult
 
 
-def add_test_calibration(config) -> None:
+def add_test_calibration(config, codec: str = "pcmu") -> None:
     config.settings.poly_group_page_calibration = PolyCalibration(
-        extension_profile_id=0xABCD,
-        extension_word_count=1,
-        mappings=[
-            PolyMapping(offset=0, source=0x44),
-            PolyMapping(offset=1, source="channel"),
-            PolyMapping(offset=2, source=0x55),
-            PolyMapping(offset=3, source=0),
-        ],
+        channel_bias=25,
+        codec=codec,
         captured_channels=[23, 24, 25],
         capture_sha256=["a" * 64, "b" * 64, "c" * 64],
         captured_at=datetime.now(UTC),
@@ -81,7 +75,8 @@ def test_poly_multicast_uses_persisted_capture_spec(
     class CalibratedTransmitter:
         def __init__(self, wire, *_args, **_kwargs) -> None:
             assert wire.calibrated
-            assert wire.spec.mappings[1] == (1, "channel")
+            assert wire.spec.channel_bias == 25
+            assert wire.caller_id.startswith(b"School Bells")
 
         def __enter__(self):
             return self
@@ -112,7 +107,7 @@ def test_poly_multicast_streams_g722_with_static_payload_type_nine(
     destination = config.destination_map["all"]
     destination.wire_format = "poly_group_page"
     destination.codecs = ["g722"]
-    add_test_calibration(config)
+    add_test_calibration(config, "g722")
     pcmu = tmp_path / "one.ulaw"
     pcmu.write_bytes(b"p" * 160)
     g722 = tmp_path / "one.g722"

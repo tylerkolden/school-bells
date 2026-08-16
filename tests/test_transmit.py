@@ -5,11 +5,13 @@ import threading
 import time
 from itertools import pairwise
 from pathlib import Path
+from typing import ClassVar
 
 import bell.transmit as transmit_module
 from bell.probe import parse_rtp
 from bell.transmit import DestinationEndpoint, TransmitResult, Transmitter
 from bell.wire.plain_rtp import PlainRTP
+from bell.wire.poly_group_page import PolyGroupPage, PolySpec
 
 
 def test_loopback_payload_counters_marker_and_pacing() -> None:
@@ -72,6 +74,48 @@ def test_one_failed_destination_does_not_stop_healthy_peer() -> None:
         result = transmitter.send([b"a" * 160, b"b" * 160], 0)
     assert result.destination_errors == {"failed": "simulated interface failure"}
     assert result.destination_bytes["healthy"] == 2 * 172
+
+
+def test_poly_session_sends_alert_redundant_audio_and_end_packets() -> None:
+    class RecordingSocket:
+        packets: ClassVar[list[bytes]] = []
+
+        def __init__(self, *_args) -> None:
+            return None
+
+        def setsockopt(self, *_args) -> None:
+            return None
+
+        def sendto(self, packet, _address) -> int:
+            self.packets.append(packet)
+            return len(packet)
+
+        def close(self) -> None:
+            return None
+
+    wire = PolyGroupPage(PolySpec(25), payload_type=9)
+    wire.alert_count = 2
+    wire.end_count = 2
+    wire.control_interval_seconds = 0
+    wire.end_delay_seconds = 0
+    destination = DestinationEndpoint("poly", "239.1.1.1", 601)
+    with Transmitter(
+        wire,
+        [destination],
+        "127.0.0.1",
+        socket_factory=RecordingSocket,
+        packet_seconds=0,
+    ) as transmitter:
+        result = transmitter.send([b"a" * 160, b"b" * 160], 25)
+
+    packets = RecordingSocket.packets
+    assert [packet[0] for packet in packets] == [0x0F, 0x0F, 0x10, 0x10, 0xFF, 0xFF]
+    assert all(packet[1] == 50 for packet in packets)
+    assert [len(packet) for packet in packets] == [20, 20, 186, 346, 20, 20]
+    assert packets[3][26:186] == b"a" * 160
+    assert packets[3][186:] == b"b" * 160
+    assert result.packet_count == 2
+    assert result.destination_bytes["poly"] == sum(map(len, packets))
 
 
 def test_cli_uses_selected_g722_payload_and_clock(tmp_path: Path, monkeypatch) -> None:

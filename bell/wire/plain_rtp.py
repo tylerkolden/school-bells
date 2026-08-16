@@ -23,7 +23,9 @@ class PlainRTP:
         ssrc: int,
         marker: bool,
         channel: int,
+        previous_payload: bytes | None = None,
     ) -> bytes:
+        del previous_payload
         if channel != 0:
             raise ValueError("plain RTP cannot express a paging channel; channel must be 0")
         second = (0x80 if marker else 0) | self.payload_type

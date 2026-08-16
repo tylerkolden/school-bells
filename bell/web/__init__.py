@@ -50,7 +50,6 @@ from bell.config import (
     DateRangeRule,
     Destination,
     PolyCalibration,
-    PolyMapping,
     Safety,
     Settings,
     StandingItem,
@@ -946,7 +945,7 @@ def create_app(
                 query = urlencode(
                     {
                         "error": (
-                            f"No compatible Poly {codec.upper()} RTP packets arrived before the "
+                            f"No compatible Poly {codec.upper()} Page packets arrived before the "
                             "10-second capture timeout."
                         )
                     }
@@ -1043,12 +1042,10 @@ def create_app(
                 f"{captured_at:%Y%m%dT%H%M%S%fZ}-{derived.evidence[0].header_sha256[:12]}"
             )
             calibration = PolyCalibration(
-                extension_profile_id=derived.spec.extension_profile_id,
-                extension_word_count=derived.spec.extension_word_count,
-                mappings=[
-                    PolyMapping(offset=offset, source=source)
-                    for offset, source in derived.spec.mappings
-                ],
+                channel_bias=derived.spec.channel_bias,
+                control_header_bytes=derived.spec.control_header_bytes,
+                audio_header_bytes=derived.spec.audio_header_bytes,
+                codec=str(contract["codec"]),
                 captured_channels=[item.channel for item in derived.evidence],
                 capture_sha256=[item.header_sha256 for item in derived.evidence],
                 captured_at=captured_at,
@@ -1498,6 +1495,7 @@ def create_app(
         request: Request,
         interface_ip: str = Form(),
         wire_format: str = Form(),
+        poly_caller_id: str = Form(),
         rtc_required: bool = Form(default=False),
         endpoint_check_interval_seconds: int = Form(),
         api_rate_limit_per_minute: int = Form(),
@@ -1523,6 +1521,7 @@ def create_app(
                     "timezone": "America/Denver",
                     "interface_ip": interface_ip,
                     "wire_format": wire_format,
+                    "poly_caller_id": poly_caller_id,
                     "rtc_required": rtc_required,
                     "endpoint_check_interval_seconds": endpoint_check_interval_seconds,
                     "api_rate_limit_per_minute": api_rate_limit_per_minute,

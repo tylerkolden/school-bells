@@ -152,6 +152,21 @@ class EndpointMonitor:
                 1,
                 time.monotonic() - started,
             )
+        calibration = self.config.settings.poly_group_page_calibration
+        if (
+            wire_name == "poly_group_page"
+            and calibration is not None
+            and destination.codecs[0] != calibration.codec
+        ):
+            return DeliveryOutcome(
+                destination.name,
+                "multicast",
+                False,
+                "calibration_mismatch",
+                "Poly destination codec changed after capture; clear and recapture",
+                1,
+                time.monotonic() - started,
+            )
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             try:

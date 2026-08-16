@@ -30,16 +30,17 @@ def login(client: TestClient) -> None:
 def captured_packet(channel: int, sequence: int, payload_type: int = 0) -> bytes:
     return (
         struct.pack(
-            "!BBHII",
-            0x90,
-            (0x80 if sequence == 1 else 0) | payload_type,
-            sequence,
+            "!BBIB13sBBI",
+            0x10,
+            channel + 25,
+            0x8899AABB,
+            13,
+            b"Headmaster\0\0\0",
+            payload_type,
+            0,
             sequence * 160,
-            99,
         )
-        + struct.pack("!HH", 0xABCD, 1)
-        + bytes((0x44, channel, 0x55, 0))
-        + b"voice payload must not persist"
+        + b"voice payload must not persist".ljust(320, b"x")
     )
 
 
@@ -109,7 +110,7 @@ def test_three_header_only_captures_activate_persisted_spec(
     for channel in (23, 24, 25):
         stored = load_capture(workspace / f"channel-{channel}.bin")
         assert len(stored) == 32
-        assert all(len(packet) == 20 and b"voice" not in packet for packet in stored)
+        assert all(len(packet) == 26 and b"voice" not in packet for packet in stored)
 
     missing_confirmation = client.post(
         "/setup/poly-calibration/activate",
@@ -134,7 +135,7 @@ def test_three_header_only_captures_activate_persisted_spec(
     assert config.settings.poly_group_page_calibration is not None
     assert config.settings.poly_group_page_calibration.captured_channels == [23, 24, 25]
     assert config.poly_spec is not None
-    assert config.poly_spec.mappings[1] == (1, "channel")
+    assert config.poly_spec.channel_bias == 25
     evidence = (
         workspace
         / "verified"
@@ -187,7 +188,7 @@ def test_g722_capture_uses_destination_codec(config_tree: Path, monkeypatch) -> 
     manifest = (workspace / "manifest.json").read_text(encoding="utf-8")
     assert '"codec":"g722"' in manifest
     stored = load_capture(workspace / "channel-25.bin")
-    assert stored and all(packet[1] & 0x7F == 9 for packet in stored)
+    assert stored and all(packet[20] == 9 for packet in stored)
 
 
 def test_capture_timeout_is_explained_without_storing_evidence(
@@ -212,7 +213,7 @@ def test_capture_timeout_is_explained_without_storing_evidence(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "No+compatible+Poly+PCMU+RTP+packets+arrived" in response.headers["location"]
+    assert "No+compatible+Poly+PCMU+Page+packets+arrived" in response.headers["location"]
     workspace = config_tree.parent / "state" / "poly-calibration"
     assert not list(workspace.glob("channel-*.bin"))
 

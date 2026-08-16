@@ -54,14 +54,15 @@ school paging systems and make the first real deployment easier to validate and 
   SHA-512/256. Both are supported; MD5 remains available only for legacy PBX interoperability.
 - [RFC 3550](https://www.rfc-editor.org/info/rfc3550/) defines RTP sequence numbers, timestamps,
   SSRCs, and RTCP. [RFC 3551](https://www.rfc-editor.org/rfc/rfc3551.html) assigns the static
-  PCMU (0), PCMA (8), and G.722 (9) payload types and the special 8 kHz G.722 RTP clock. Paging media
-  uses random stream state and 20 ms cumulative pacing.
+  PCMU (0), PCMA (8), and G.722 (9) payload types and the special 8 kHz G.722 RTP clock. Regular RTP
+  media uses random stream state and 20 ms cumulative pacing. Poly Group Page uses its separately
+  published 20-byte session header and PCMU/G.722 codec identifiers.
 
 ## Deliberate limits
 
 This is a one-way scheduled paging controller, not a general-purpose PBX, E911 system, fire-alarm
 control panel, or certified life-safety system. SIP supports outbound paging and OPTIONS monitoring,
-not inbound phone registration or two-way intercom. The proprietary Poly extension remains blocked
-until the school's real packet capture is available. No protocol adapter may weaken that guard.
+not inbound phone registration or two-way intercom. Poly Page transmission remains blocked until
+the school's live packet contract is verified and persisted. No protocol adapter may weaken that guard.
 SRTP, NAPTR/SRV discovery, strict-route SIP proxies, and vendor-specific codecs are not claimed;
 unsupported secure-media SDP is rejected without a cleartext downgrade.
