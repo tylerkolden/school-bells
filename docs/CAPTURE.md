@@ -43,6 +43,11 @@ The web console automates capture, privacy filtering, comparison, persistence, a
 8. Restore horn subscriptions, then deliberately disable the kill switch only after reviewing
    System status and running `python scripts/acceptance.py`.
 
+If capture reports that the service cannot listen on UDP port 601, update to release v0.6.1 or
+newer and restart `bell-system`. Linux reserves ports below 1024; the production unit grants only
+`CAP_NET_BIND_SERVICE` so the unprivileged `bell` process can open that configured UDP port. It does
+not grant raw-packet capture or network-administration access.
+
 The wizard fails closed on silence, mixed layouts, non-PCMU traffic, independently changing
 extension bytes, an address/port change after capture, or fewer than three known channels. It never
 guesses a proprietary header.

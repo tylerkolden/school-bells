@@ -302,6 +302,8 @@ lunch period. Do not load the full production schedule until that controlled tes
 
 The systemd unit uses readiness notification and a watchdog heartbeat. If the scheduler, endpoint
 monitor, health server, or operator server dies, the process exits nonzero and systemd restarts it.
-It runs with no Linux capabilities and a restricted filesystem/device/namespace view.
+It runs with only `CAP_NET_BIND_SERVICE`, which is required to capture the default privileged UDP
+port 601 during Poly calibration, plus a restricted filesystem/device/namespace view. It does not
+receive raw-packet, network-administration, or general root capabilities.
 
 The product comparison and standards rationale are documented in [docs/RESEARCH.md](docs/RESEARCH.md).

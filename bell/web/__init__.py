@@ -924,6 +924,16 @@ def create_app(
                     {"error": "No page packets arrived before the 10-second capture timeout."}
                 )
                 return RedirectResponse(f"/setup/poly-calibration?{query}", status_code=303)
+            except PermissionError:
+                query = urlencode(
+                    {
+                        "error": (
+                            f"The service cannot listen on UDP port {destination.port}. "
+                            "Install release v0.6.1 or newer, restart bell-system, and try again."
+                        )
+                    }
+                )
+                return RedirectResponse(f"/setup/poly-calibration?{query}", status_code=303)
             except (OSError, CalibrationError) as exc:
                 query = urlencode({"error": str(exc)})
                 return RedirectResponse(f"/setup/poly-calibration?{query}", status_code=303)
