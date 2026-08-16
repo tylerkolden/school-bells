@@ -21,7 +21,35 @@ Re-enable Group 24 immediately after capture.
 On a Yealink T31P, configure a DSS key as **Paging List** and ensure the list contains channels
 23 (Indoors) and 24 (Outdoors). Pick a quiet test window and notify staff nearby.
 
-## Capture both channels
+## Recommended: guided capture on the Raspberry Pi
+
+The web console automates capture, privacy filtering, comparison, persistence, and runtime reload:
+
+1. In **Setup → Safety & settings**, enable the transmission kill switch. This prevents scheduled
+   or manual bells from competing with the known external pages used for calibration.
+2. In **Setup → Destinations**, save the multicast address and UDP port that the phones use. Choose
+   **Poly Group Page**, then select **Run guided Poly capture**.
+3. Choose the enabled multicast destination and enter the exact channel you will page from a known
+   Poly/Yealink source.
+4. Select **Start 10-second capture** and immediately trigger that page. Repeat for at least three
+   distinct channels. Channels 23, 24, and 25 are the normal school defaults.
+5. The Pi accepts only RTP version 2, PCMU payload type 0, and a consistent RTP extension layout.
+   It discards audio payloads immediately and stores only RTP headers.
+6. If exactly one full-byte channel position and constant values for every other extension byte are
+   proven across all packets, review the candidate, confirm the known-channel labels, and activate.
+7. Activation archives header-only evidence and SHA-256 hashes under
+   `state/poly-calibration/verified`, writes the derived mapping to `settings.yaml`, validates the
+   complete configuration, reloads the service, and keeps the kill switch enabled.
+8. Restore horn subscriptions, then deliberately disable the kill switch only after reviewing
+   System status and running `python scripts/acceptance.py`.
+
+The wizard fails closed on silence, mixed layouts, non-PCMU traffic, independently changing
+extension bytes, an address/port change after capture, or fewer than three known channels. It never
+guesses a proprietary header.
+
+## Manual fallback
+
+Use this only when the guided workflow reports an unsupported or ambiguous extension layout.
 
 On the wired host, install the project (the probe itself only needs Python's standard library).
 Replace `<wired-ip>` with the host's address:
@@ -50,7 +78,7 @@ The channel-carrying byte should change from decimal 23 to 24. Confirm the diffe
 the extension bytes, not voice payload. If multiple bytes change, capture again with silence and
 several channels; do not guess.
 
-## Encode the observed result
+## Encode a manually reviewed result
 
 In `bell/wire/poly_group_page.py`, set `SPEC` using only observed values:
 

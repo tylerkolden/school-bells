@@ -8,7 +8,7 @@ import ipaddress
 import os
 import re
 from collections.abc import Sequence
-from datetime import date, time
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -220,6 +220,48 @@ class Safety(BaseModel):
     kill_switch_until: date | None = None
 
 
+class PolyMapping(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    offset: int = Field(ge=0, le=262139)
+    source: Literal["channel"] | int
+
+    @field_validator("source")
+    @classmethod
+    def source_fits_byte(cls, value: str | int) -> str | int:
+        if isinstance(value, int) and not 0 <= value <= 0xFF:
+            raise ValueError("constant source must fit in one byte")
+        return value
+
+
+class PolyCalibration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    extension_profile_id: int = Field(ge=0, le=0xFFFF)
+    extension_word_count: int = Field(ge=1, le=0xFFFF)
+    mappings: list[PolyMapping]
+    captured_channels: list[int] = Field(min_length=3)
+    capture_sha256: list[str] = Field(min_length=3)
+    captured_at: datetime
+    evidence_id: str = Field(pattern=r"^[0-9]{8}T[0-9]{12}Z-[0-9a-f]{12}$")
+
+    @model_validator(mode="after")
+    def complete_proven_layout(self) -> PolyCalibration:
+        extension_size = self.extension_word_count * 4
+        offsets = [item.offset for item in self.mappings]
+        if sorted(offsets) != list(range(extension_size)):
+            raise ValueError("mappings must cover every extension byte exactly once")
+        if sum(item.source == "channel" for item in self.mappings) != 1:
+            raise ValueError("mappings must contain exactly one channel byte")
+        if len(self.captured_channels) != len(set(self.captured_channels)):
+            raise ValueError("captured_channels must be unique")
+        if any(not 1 <= channel <= 25 for channel in self.captured_channels):
+            raise ValueError("captured_channels must be between 1 and 25")
+        if len(self.capture_sha256) != len(self.captured_channels) or any(
+            not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in self.capture_sha256
+        ):
+            raise ValueError("capture_sha256 must contain one lowercase SHA-256 per channel")
+        return self
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     timezone: str = "America/Denver"
@@ -231,6 +273,7 @@ class Settings(BaseModel):
     clock_sync_required: bool = True
     max_audio_seconds: float = Field(default=30.0, ge=0.25, le=600.0)
     max_page_seconds: float = Field(default=120.0, ge=1.0, le=1800.0)
+    poly_group_page_calibration: PolyCalibration | None = None
     sounds_dir: Path = Path("sounds")
     state_dir: Path = Path("state")
     log_dir: Path = Path("logs")
@@ -287,6 +330,20 @@ class BellConfig(BaseModel):
         return _resolve_path(self.settings.sounds_dir, self.config_dir.parent)
 
     @property
+    def poly_spec(self):
+        """Return the runtime wire spec proven by persisted capture evidence, if any."""
+        calibration = self.settings.poly_group_page_calibration
+        if calibration is None:
+            return None
+        from bell.wire.poly_group_page import PolySpec
+
+        return PolySpec(
+            calibration.extension_profile_id,
+            calibration.extension_word_count,
+            tuple((item.offset, item.source) for item in calibration.mappings),
+        )
+
+    @property
     def state_path(self) -> Path:
         return _resolve_path(self.settings.state_dir, self.config_dir.parent)
 
@@ -300,6 +357,10 @@ class BellConfig(BaseModel):
         for path in sorted(self.config_dir.glob("*.yaml")):
             digest.update(path.name.encode())
             digest.update(path.read_bytes())
+        if self.sounds_path.is_dir():
+            for path in sorted(item for item in self.sounds_path.iterdir() if item.is_file()):
+                digest.update(f"sounds/{path.name}".encode())
+                digest.update(path.read_bytes())
         return digest.hexdigest()
 
 

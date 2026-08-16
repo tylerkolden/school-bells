@@ -90,30 +90,35 @@ def loopback_check(raw: Path, interface_ip: str) -> tuple[bool, str]:
     return True, f"5 PCMU frames passed end to end on dedicated group {test_group}"
 
 
-def poly_golden_check(fixture_dir: Path) -> tuple[bool, str]:
-    wire = PolyGroupPage()
+def poly_golden_check(config) -> tuple[bool, str]:
+    if config is None or config.settings.poly_group_page_calibration is None:
+        return False, "not calibrated - run the guided capture in Setup"
+    calibration = config.settings.poly_group_page_calibration
+    wire = PolyGroupPage(config.poly_spec)
     if not wire.calibrated:
-        return False, "not calibrated - follow docs/CAPTURE.md"
+        return False, "persisted calibration could not be loaded"
+    evidence_dir = config.state_path / "poly-calibration" / "verified" / calibration.evidence_id
     try:
-        for channel in (23, 24):
-            path = fixture_dir / f"ch{channel}.bin"
+        for channel in calibration.captured_channels:
+            path = evidence_dir / f"channel-{channel}.bin"
             packets = load_capture(path)
             if not packets:
                 return False, f"{path.name} contains no packets"
-            parsed = parse_rtp(packets[0])
-            rebuilt = wire.build_packet(
-                parsed.payload,
-                parsed.sequence,
-                parsed.timestamp,
-                parsed.ssrc,
-                parsed.marker,
-                channel,
-            )
-            if rebuilt != packets[0]:
-                return False, f"generated channel {channel} packet does not match {path.name}"
+            for packet in packets:
+                parsed = parse_rtp(packet)
+                rebuilt = wire.build_packet(
+                    b"",
+                    parsed.sequence,
+                    parsed.timestamp,
+                    parsed.ssrc,
+                    parsed.marker,
+                    channel,
+                )
+                if rebuilt != packet:
+                    return False, f"generated channel {channel} header does not match evidence"
     except (OSError, ValueError, RuntimeError) as exc:
-        return False, f"golden fixture verification failed: {exc}"
-    return True, "calibrated builder exactly matches channel 23 and 24 golden captures"
+        return False, f"capture evidence verification failed: {exc}"
+    return True, f"calibrated builder matches {len(calibration.captured_channels)} live captures"
 
 
 def main() -> int:
@@ -218,8 +223,7 @@ def main() -> int:
     else:
         checks.append(Check("loopback RTP", False, "no transcoded sound available"))
 
-    fixture_dir = ROOT / "tests" / "fixtures"
-    golden, golden_reason = poly_golden_check(fixture_dir)
+    golden, golden_reason = poly_golden_check(config)
     checks.append(Check("Poly calibration", golden, golden_reason))
 
     if config:

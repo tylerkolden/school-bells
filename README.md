@@ -7,11 +7,14 @@ duplicate bells, and exposes a simple front-office UI.
 
 > **Deployment gate:** Poly Group Page's proprietary RTP extension is intentionally
 > uncalibrated. The system will not transmit a guessed header. Complete
-> [the capture procedure](docs/CAPTURE.md) on the phone VLAN before live use.
+> the guided **Setup → Run guided Poly capture** workflow on the Raspberry Pi before live use.
+> See [the capture procedure](docs/CAPTURE.md) for preparation and the manual fallback.
 
 ## Zones
 
-All zones use `239.255.255.255:601`; the Poly channel is the zone selector.
+Multicast destinations default to `239.255.255.255:601`; administrators may change the multicast
+IPv4 address and UDP port in **Setup → Destinations** to match receiver provisioning. The Poly
+channel is the zone selector.
 
 | Channel | Zone | Desk phones | Algo horn | Typical use |
 |---:|---|:---:|:---:|---|
@@ -26,7 +29,8 @@ deliberately restricted to PCMU for receiver compatibility.
 
 ## Architecture
 
-- `bell/wire/` builds packets. `PolyGroupPage` fails closed until calibrated from a capture.
+- `bell/wire/` builds packets. `PolyGroupPage` fails closed until a three-channel live capture is
+  derived, confirmed, persisted, and revalidated against its header-only evidence.
 - `bell/audio.py` prepares, probes, caches, and transcodes audio with ffmpeg.
 - `bell/transmit.py` sends synchronized destination streams with cumulative pacing correction.
 - `bell/protocols/` provides SIP UDP/TCP/TLS paging and signed HTTP(S) delivery adapters.
@@ -68,6 +72,8 @@ docker compose up --build --detach --wait
 
 Open <http://localhost:8080> and sign in with the default local-only password
 `local-test-only`. Open <http://localhost:9000> in a second tab to see each simulated page arrive.
+After a successful Ring Now test, the result banner also links directly to that receiver dashboard.
+When testing outside configured bell hours, select the logged emergency-hours override as prompted.
 The stack uses a dedicated bridge network, both ports bind only to Windows loopback, all Linux
 capabilities are dropped, and the only configured delivery destination is the bundled HTTP receiver.
 It cannot send multicast to phones or horns. Production OTA is also disabled; rebuild the image to
@@ -135,6 +141,20 @@ Example scheduled event:
   label: First bell
 ```
 
+Administrators normally edit this from **Schedules** in the web console. The Schedule Builder can
+create, duplicate, edit, preview, and safely delete schedules; each row exposes time, sound, zone,
+repeat, priority, optional pre-tone, and audio-busy behavior. **Save & activate** validates the
+complete configuration, writes an atomic backup, and reloads today's future jobs without replaying
+past bells. The browser's sound preview stays local and never transmits to a paging zone.
+
+The **Setup** workspace provides dependency-aware administration for standing items, weekday
+defaults, date ranges, sounds, zones, delivery destinations, and safety settings. Create, update,
+and delete actions use the same stale-edit detection and rollback pipeline. Referenced sounds,
+zones, and destinations cannot be deleted until their dependents are changed. Multicast edits
+validate an IPv4 multicast address and UDP port while keeping the required PCMU codec fixed.
+Uploaded audio is bounded,
+validated by FFmpeg, normalized, and stored as 8 kHz mono WAV before it enters the library.
+
 Example snow day:
 
 ```yaml
@@ -200,8 +220,10 @@ The office service exposes JSON endpoints on the same port as the UI:
 - `POST /api/v1/trigger`
 
 The service-only `GET /ready` endpoint returns HTTP 503 until the clock, scheduler, monitor, and
-every required destination are ready. This makes it suitable for systemd and external watchdogs;
-the JSON response names each failing readiness condition.
+every required destination are ready. This makes it suitable for systemd and external readiness
+watchdogs. Docker's image health check uses liveness (`GET /health`) so an intentionally degraded
+test configuration remains inspectable in the UI. The JSON response names each failing readiness
+condition.
 `GET /metrics` on the same localhost-only port exposes a small Prometheus text endpoint for readiness,
 uptime, and per-destination health without adding a metrics framework dependency.
 
@@ -221,8 +243,9 @@ curl -X POST https://bell.example.edu:8080/api/v1/trigger \
 Use a trusted certificate via `BELL_TLS_CERTFILE` and `BELL_TLS_KEYFILE` whenever API/password traffic
 can cross anything beyond a physically trusted management LAN. Security headers, strict session
 cookies under TLS, per-session CSRF protection, sign-in throttling, no-store responses, scoped keys,
-and HMAC outbound signatures are built in. Calendar saves use a configuration fingerprint to reject
-stale edits, retain rolling backups, and atomically replace the YAML only after validation.
+and HMAC outbound signatures are built in. Calendar and schedule saves use a configuration
+fingerprint to reject stale edits, retain rolling backups, and atomically replace YAML only after
+validation. A failed live reload restores the previous file and runtime configuration.
 
 ## Phones and Algo
 

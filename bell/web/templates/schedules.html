@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}Schedule Builder · School Bell{% endblock %}
+{% block main_class %}builder-main{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <span class="eyebrow">Programming</span>
+    <h1>Schedule Builder</h1>
+    <p class="lede">Choose exactly what plays, where it plays, and when.</p>
+  </div>
+  <a class="button primary" href="/schedules?new=true">Create schedule</a>
+</div>
+
+{% if message %}<div class="notice info" role="status"><strong>{{ message }}</strong></div>{% endif %}
+
+<div class="builder-shell" data-schedule-builder data-event-limit="{{ event_limit }}" data-emergency-threshold="{{ config.safety.emergency_priority_threshold }}">
+  <aside class="schedule-library card" aria-label="Schedule library">
+    <div class="builder-panel-heading">
+      <div><span class="overline">Library</span><h2>Schedules</h2></div>
+      <span class="count-badge">{{ config.schedules|length }}</span>
+    </div>
+    <nav class="schedule-links" aria-label="Saved schedules">
+      {% for item in config.schedules %}
+      <a href="/schedules?selected={{ item.name|urlencode }}"{% if not is_new and item.name == schedule.name %} aria-current="page"{% endif %}>
+        <span>{{ item.name }}</span><small>{{ item.events|length }} event{% if item.events|length != 1 %}s{% endif %}</small>
+      </a>
+      {% else %}
+      <p class="empty-inline">No saved schedules yet.</p>
+      {% endfor %}
+    </nav>
+  </aside>
+
+  <section class="builder-workspace">
+    <form action="/schedules/save" method="post" class="builder-form" data-builder-form>
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="config_hash" value="{{ config_hash }}">
+      <input type="hidden" name="original_name" value="{{ original_name }}">
+
+      <div class="card schedule-settings">
+        <div class="builder-panel-heading">
+          <div>
+            <span class="overline">{% if is_new %}New schedule{% else %}Editing{% endif %}</span>
+            <h2>{% if is_new %}Schedule details{% else %}{{ schedule.name }}{% endif %}</h2>
+          </div>
+          {% if original_name %}<a class="button secondary compact" href="/schedules?copy={{ original_name|urlencode }}">Duplicate</a>{% endif %}
+        </div>
+        <label>Schedule name
+          <input name="schedule_name" value="{{ schedule.name }}" maxlength="100" required autocomplete="off"{% if original_name %} readonly aria-describedby="name-help"{% endif %}>
+        </label>
+        {% if original_name %}<small id="name-help" class="field-help">Names are locked because calendars may reference them. Duplicate this schedule to make a renamed copy.</small>{% endif %}
+        <div class="safety-strip" aria-label="Schedule safety limits">
+          <span><strong>{{ config.safety.allowed_hours_start.strftime('%H:%M') }}–{{ config.safety.allowed_hours_end.strftime('%H:%M') }}</strong> allowed hours</span>
+          <span><strong>{{ event_limit }}</strong> schedule event limit</span>
+          <span><strong>{{ enabled_standing_items }}</strong> standing item{% if enabled_standing_items != 1 %}s{% endif %} added daily</span>
+        </div>
+      </div>
+
+      <div class="card events-panel">
+        <div class="builder-panel-heading">
+          <div><span class="overline">Timeline</span><h2>Bell events</h2></div>
+          <button class="secondary" type="button" data-add-event>+ Add event</button>
+        </div>
+        <div class="notice warning compact-notice" data-event-warning hidden role="alert"></div>
+        <div class="event-editor-list" data-event-list>
+          {% for event in schedule.events %}
+          <fieldset class="event-editor" data-event-row>
+            <legend><span data-row-number>Event {{ loop.index }}</span><span class="event-editor-summary" data-row-summary>{{ event.time.strftime('%H:%M') }} · {{ event.label }}</span></legend>
+            <div class="event-grid primary-fields">
+              <label>Time
+                <input type="time" name="event_time" value="{{ event.time.strftime('%H:%M') }}" min="{{ config.safety.allowed_hours_start.strftime('%H:%M') }}" max="{{ config.safety.allowed_hours_end.strftime('%H:%M') }}" step="60" required>
+              </label>
+              <label class="wide-field">Label
+                <input name="event_label" value="{{ event.label }}" maxlength="100" required autocomplete="off" placeholder="Class change">
+              </label>
+              <label>Zone
+                <select name="event_zone" required>
+                  {% for zone in zones %}<option value="{{ zone.name }}"{% if event.zone == zone.name %} selected{% endif %}>{{ zone.name }} — {{ zone.description }}</option>{% endfor %}
+                </select>
+              </label>
+              <label>Sound
+                <select name="event_sound" required data-sound-select>
+                  {% for sound in sounds %}<option value="{{ sound }}"{% if event.sound == sound %} selected{% endif %}>{{ sound }}</option>{% endfor %}
+                </select>
+              </label>
+            </div>
+            <details class="advanced-fields">
+              <summary>Repeat, priority, pre-tone, and conflict handling</summary>
+              <div class="event-grid">
+                <label>Repeat count
+                  <input type="number" name="event_repeat_count" value="{{ event.repeat_count }}" min="1" max="{{ config.safety.max_repeats }}" step="1" required>
+                </label>
+                <label>Seconds between repeats
+                  <input type="number" name="event_repeat_interval" value="{{ event.repeat_interval_seconds }}" min="0" max="30" step="0.5" required>
+                </label>
+                <label>Priority (0–100)
+                  <input type="number" name="event_priority" value="{{ event.priority }}" min="0" max="100" step="1" required>
+                </label>
+                <label>When audio is busy
+                  <select name="event_busy_policy" required>
+                    <option value="skip"{% if event.busy_policy == 'skip' %} selected{% endif %}>Skip — safest default</option>
+                    <option value="queue"{% if event.busy_policy == 'queue' %} selected{% endif %}>Queue after current audio</option>
+                    <option value="preempt"{% if event.busy_policy == 'preempt' %} selected{% endif %}>Preempt lower priority</option>
+                  </select>
+                </label>
+                <label class="wide-field">Optional pre-tone
+                  <select name="event_pre_tone">
+                    <option value="">None</option>
+                    {% for sound in sounds %}<option value="{{ sound }}"{% if event.pre_tone == sound %} selected{% endif %}>{{ sound }}</option>{% endfor %}
+                  </select>
+                </label>
+              </div>
+            </details>
+            <div class="row-actions">
+              <button type="button" class="text-button danger-text" data-remove-event>Remove</button>
+            </div>
+          </fieldset>
+          {% endfor %}
+        </div>
+        <div class="empty-event-state" data-empty-events{% if schedule.events %} hidden{% endif %}>
+          <strong>No bell events yet</strong>
+          <span>Add the first event to start this schedule.</span>
+          <button class="secondary" type="button" data-add-event>+ Add first event</button>
+        </div>
+      </div>
+
+      <div class="save-bar card">
+        <div>
+          <strong>Changes are validated before activation</strong>
+          <small>The previous file is backed up. If validation or live reload fails, it is restored automatically.</small>
+        </div>
+        <div class="button-row">
+          <a class="button secondary" href="{% if original_name %}/schedules?selected={{ original_name|urlencode }}{% else %}/schedules?new=true{% endif %}" data-reload-saved>Reload saved version</a>
+          <button class="primary" type="submit" data-save-schedule>Save &amp; activate</button>
+        </div>
+      </div>
+    </form>
+
+    <aside class="preview-card card" aria-labelledby="preview-heading">
+      <div class="builder-panel-heading">
+        <div><span class="overline">Live preview</span><h2 id="preview-heading">Daily run</h2></div>
+        <span class="count-badge" data-preview-count>0</span>
+      </div>
+      <p class="field-help">Preview sorts by time, matching the scheduler. Standing items are shown separately on Today.</p>
+      <ol class="timeline-preview" data-timeline-preview></ol>
+      <div class="sound-preview">
+        <label for="preview-sound">Sound preview</label>
+        <select id="preview-sound" data-preview-sound>
+          {% for sound in sounds %}<option value="{{ sound }}">{{ sound }}</option>{% endfor %}
+        </select>
+        <audio controls preload="none" data-preview-audio>
+          Your browser does not support audio preview.
+        </audio>
+        <small>Preview plays only in this browser; it does not ring school zones.</small>
+      </div>
+    </aside>
+  </section>
+</div>
+
+{% if original_name %}
+<section class="danger-zone card">
+  <div>
+    <span class="overline">Danger zone</span>
+    <h2>Delete {{ original_name }}</h2>
+    {% if references %}
+    <p>This schedule cannot be deleted until these assignments change: {{ references|join(', ') }}.</p>
+    {% else %}
+    <p>This schedule has no calendar assignments. Deletion is immediate, backed up, and validated.</p>
+    {% endif %}
+  </div>
+  <form action="/schedules/delete" method="post" data-delete-form>
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="config_hash" value="{{ config_hash }}">
+    <input type="hidden" name="schedule_name" value="{{ original_name }}">
+    <button class="danger-button" type="submit"{% if references %} disabled{% endif %}>Delete schedule</button>
+  </form>
+</section>
+{% endif %}
+
+<template id="event-row-template">
+  <fieldset class="event-editor" data-event-row>
+    <legend><span data-row-number>New event</span><span class="event-editor-summary" data-row-summary></span></legend>
+    <div class="event-grid primary-fields">
+      <label>Time
+        <input type="time" name="event_time" min="{{ config.safety.allowed_hours_start.strftime('%H:%M') }}" max="{{ config.safety.allowed_hours_end.strftime('%H:%M') }}" step="60" required>
+      </label>
+      <label class="wide-field">Label
+        <input name="event_label" maxlength="100" required autocomplete="off" placeholder="Class change">
+      </label>
+      <label>Zone
+        <select name="event_zone" required>{% for zone in zones %}<option value="{{ zone.name }}">{{ zone.name }} — {{ zone.description }}</option>{% endfor %}</select>
+      </label>
+      <label>Sound
+        <select name="event_sound" required data-sound-select>{% for sound in sounds %}<option value="{{ sound }}"{% if sound == 'class-bell.wav' %} selected{% endif %}>{{ sound }}</option>{% endfor %}</select>
+      </label>
+    </div>
+    <details class="advanced-fields">
+      <summary>Repeat, priority, pre-tone, and conflict handling</summary>
+      <div class="event-grid">
+        <label>Repeat count<input type="number" name="event_repeat_count" value="1" min="1" max="{{ config.safety.max_repeats }}" step="1" required></label>
+        <label>Seconds between repeats<input type="number" name="event_repeat_interval" value="0" min="0" max="30" step="0.5" required></label>
+        <label>Priority (0–100)<input type="number" name="event_priority" value="50" min="0" max="100" step="1" required></label>
+        <label>When audio is busy
+          <select name="event_busy_policy" required><option value="skip">Skip — safest default</option><option value="queue">Queue after current audio</option><option value="preempt">Preempt lower priority</option></select>
+        </label>
+        <label class="wide-field">Optional pre-tone
+          <select name="event_pre_tone"><option value="">None</option>{% for sound in sounds %}<option value="{{ sound }}">{{ sound }}</option>{% endfor %}</select>
+        </label>
+      </div>
+    </details>
+    <div class="row-actions">
+      <button type="button" class="text-button danger-text" data-remove-event>Remove</button>
+    </div>
+  </fieldset>
+</template>
+{% endblock %}

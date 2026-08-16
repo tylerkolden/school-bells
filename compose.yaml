@@ -15,6 +15,7 @@ services:
       BELL_UI_PASSWORD: ${BELL_UI_PASSWORD:-local-test-only}
       BELL_UI_SESSION_SECRET: ${BELL_UI_SESSION_SECRET:-local-docker-session-secret-not-for-production-2026}
       BELL_OTA_ENABLED: "false"
+      BELL_RECEIVER_DASHBOARD_URL: http://localhost:9000/
     ports:
       - "127.0.0.1:8080:8080"
     volumes:

@@ -28,7 +28,7 @@ required and the override is logged at WARNING.
    fire records. A bell more than 60 seconds late is intentionally skipped.
 5. From a wired VLAN host, run `python -m bell.listen --iface <ip> --seconds 10 --output test.wav`
    during a controlled transmission. This confirms packets and playable PCMU on the wire.
-6. Use `sudo tcpdump -ni eth0 udp port 601` to verify multicast leaves the Pi.
+6. Use `sudo tcpdump -ni eth0 udp port <configured-port>` to verify multicast leaves the Pi.
 7. Confirm the T31P multicast subscriptions and Algo Receiver/Poly Group Page configuration.
 8. Ask whether the hosted provider reprovisioned phones; provisioning can wipe local web-UI
    settings overnight.
@@ -69,8 +69,9 @@ cd /opt/bell/current
 Keep the full production schedule disabled until Poly calibration passes and one observed channel-23
 bell succeeds during a low-impact period.
 
-Calendar changes made in the UI create atomic backups under `state/config-backups/`; the newest 30 are
-retained. If validation fails, the previous calendar is restored automatically. Restore manually only
+Calendar and Schedule Builder changes made in the UI create atomic backups under
+`state/config-backups/`; the newest 30 of each type are retained. If validation or live activation
+fails, the previous file and runtime configuration are restored automatically. Restore manually only
 with the service stopped, preserve ownership, validate, and then restart:
 
 ```bash
@@ -79,6 +80,11 @@ sudo -u bell cp state/config-backups/calendar-<timestamp>.yaml config/calendar.y
 sudo -u bell .venv/bin/python -m bell.config validate --config-dir config
 sudo systemctl start bell-system
 ```
+
+Setup changes for zones, destinations, standing items, calendar rules, and safety settings use the
+same validation/backup/rollback path. Sound replacements and deletions retain recovery copies under
+`state/sound-backups/`. The UI blocks deletion of a sound, zone, destination, or schedule while
+another configuration object references it; resolve the listed dependencies first.
 
 Automation keys are credentials. Rotate normal and emergency keys independently, keep the emergency
 key only in approved panic-button/integration systems, and never put either key in a URL or browser
