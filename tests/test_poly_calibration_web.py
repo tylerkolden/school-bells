@@ -67,7 +67,7 @@ def test_three_header_only_captures_activate_persisted_spec(
     enable_capture_mode(config_tree)
     channels = iter((23, 24, 25))
 
-    def fake_capture(_group: str, _port: int, _interface: str, count: int):
+    def fake_capture(_group: str, _port: int, _interface: str, count: int, **_kwargs):
         channel = next(channels)
         packets = [captured_packet(channel, sequence) for sequence in range(1, count + 1)]
         return packets, [float(index) for index in range(count)]
@@ -148,7 +148,7 @@ def test_capture_timeout_is_explained_without_storing_evidence(
 ) -> None:
     enable_capture_mode(config_tree)
 
-    def timeout(*_args):
+    def timeout(*_args, **_kwargs):
         raise TimeoutError
 
     monkeypatch.setattr("bell.web.capture_rtp", timeout)
@@ -165,7 +165,7 @@ def test_capture_timeout_is_explained_without_storing_evidence(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "No+page+packets+arrived" in response.headers["location"]
+    assert "No+compatible+Poly+PCMU+RTP+packets+arrived" in response.headers["location"]
     workspace = config_tree.parent / "state" / "poly-calibration"
     assert not list(workspace.glob("channel-*.bin"))
 
@@ -175,7 +175,7 @@ def test_capture_permission_error_explains_required_release(
 ) -> None:
     enable_capture_mode(config_tree)
 
-    def denied(*_args):
+    def denied(*_args, **_kwargs):
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr("bell.web.capture_rtp", denied)

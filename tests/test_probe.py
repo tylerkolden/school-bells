@@ -3,6 +3,7 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+from bell import probe
 from bell.listen import _pcmu_payload, _ulaw_to_pcm16
 from bell.probe import compare_packets, load_capture, parse_rtp, save_capture
 from bell.wire.plain_rtp import PlainRTP
@@ -28,6 +29,36 @@ def test_capture_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "capture.bin"
     save_capture(path, packets)
     assert load_capture(path) == packets
+
+
+def test_live_capture_counts_only_transformed_packets(monkeypatch) -> None:
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.packets = iter((b"control", b"page-1", b"page-2"))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+        def settimeout(self, _timeout: float) -> None:
+            pass
+
+        def recvfrom(self, _size: int):
+            return next(self.packets), ("192.0.2.1", 601)
+
+    monkeypatch.setattr(probe, "join_socket", lambda *_args: FakeSocket())
+    packets, arrivals = probe.capture(
+        "239.255.255.255",
+        601,
+        "192.0.2.2",
+        2,
+        transform=lambda packet: None if packet == b"control" else packet.upper(),
+    )
+
+    assert packets == [b"PAGE-1", b"PAGE-2"]
+    assert len(arrivals) == 2
 
 
 def test_listener_extracts_and_decodes_pcmu() -> None:
