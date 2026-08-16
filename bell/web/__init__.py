@@ -742,7 +742,7 @@ def create_app(
             "ui_action",
             extra={
                 "action": "schedule_save",
-                "target": schedule_name,
+                "target": "schedule",
                 "events": event_count,
                 "result": "success",
             },
@@ -778,7 +778,7 @@ def create_app(
         write_config_document("schedules.yaml", "schedules", config_hash, mutate)
         LOGGER.info(
             "ui_action",
-            extra={"action": "schedule_delete", "target": schedule_name, "result": "success"},
+            extra={"action": "schedule_delete", "target": "schedule", "result": "success"},
         )
         query = urlencode({"message": f"{schedule_name} was deleted."})
         return RedirectResponse(f"/schedules?{query}", status_code=303)
@@ -946,7 +946,7 @@ def create_app(
             "ui_action",
             extra={
                 "action": "poly_capture",
-                "target": destination.name,
+                "target": "multicast_destination",
                 "channel": known_channel,
                 "packets": len(headers),
                 "result": "captured_headers_only",
@@ -1132,7 +1132,7 @@ def create_app(
         action = "created" if standing_index == -1 else "updated"
         LOGGER.info(
             "ui_action",
-            extra={"action": f"standing_item_{action}", "target": label, "result": "success"},
+            extra={"action": f"standing_item_{action}", "target": "standing_item", "result": "success"},
         )
         return RedirectResponse(
             f"/setup?{urlencode({'message': f'Standing item {action}.'})}#standing-items",
