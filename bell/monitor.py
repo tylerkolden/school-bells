@@ -142,7 +142,7 @@ class EndpointMonitor:
     def _check_multicast(self, destination: Destination) -> DeliveryOutcome:
         started = time.monotonic()
         wire_name = destination.wire_format or self.config.settings.wire_format
-        if wire_name == "poly_group_page" and not PolyGroupPage().calibrated:
+        if wire_name == "poly_group_page" and not PolyGroupPage(self.config.poly_spec).calibrated:
             return DeliveryOutcome(
                 destination.name,
                 "multicast",

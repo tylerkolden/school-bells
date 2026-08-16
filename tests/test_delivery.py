@@ -1,16 +1,34 @@
 from __future__ import annotations
 
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 import bell.delivery as delivery_module
-from bell.config import load_config
+from bell.config import PolyCalibration, PolyMapping, load_config
 from bell.delivery import DeliveryManager, PageDeliveryError
 from bell.monitor import EndpointRegistry
 from bell.protocols.base import DeliveryOutcome
 from bell.transmit import TransmitResult
+
+
+def add_test_calibration(config) -> None:
+    config.settings.poly_group_page_calibration = PolyCalibration(
+        extension_profile_id=0xABCD,
+        extension_word_count=1,
+        mappings=[
+            PolyMapping(offset=0, source=0x44),
+            PolyMapping(offset=1, source="channel"),
+            PolyMapping(offset=2, source=0x55),
+            PolyMapping(offset=3, source=0),
+        ],
+        captured_channels=[23, 24, 25],
+        capture_sha256=["a" * 64, "b" * 64, "c" * 64],
+        captured_at=datetime.now(UTC),
+        evidence_id="20260815T120000000000Z-aaaaaaaaaaaa",
+    )
 
 
 def test_plain_multicast_delivery_report(
@@ -47,6 +65,43 @@ def test_plain_multicast_delivery_report(
     )
     assert report.successful
     assert report.outcomes[0].status == "sent"
+
+
+def test_poly_multicast_uses_persisted_capture_spec(
+    config_tree: Path, tmp_path: Path, monkeypatch
+) -> None:
+    config = load_config(config_tree)
+    config.settings.interface_ip = "127.0.0.1"
+    config.settings.wire_format = "poly_group_page"
+    config.destination_map["all"].wire_format = "poly_group_page"
+    add_test_calibration(config)
+    raw = tmp_path / "one.ulaw"
+    raw.write_bytes(b"a" * 160)
+
+    class CalibratedTransmitter:
+        def __init__(self, wire, *_args, **_kwargs) -> None:
+            assert wire.calibrated
+            assert wire.spec.mappings[1] == (1, "channel")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def send(self, _frames, channel, _cancel) -> TransmitResult:
+            assert channel == 23
+            return TransmitResult(1, 0.02, 0.001, 0.001, {"all": 180}, {}, False)
+
+    monkeypatch.setattr(delivery_module, "Transmitter", CalibratedTransmitter)
+    event = config.schedule_map["Regular Day"].events[0]
+    report = DeliveryManager(config, EndpointRegistry()).deliver(
+        raw,
+        event,
+        config.zone_map[event.zone],
+        threading.Event(),
+    )
+    assert report.successful
 
 
 def test_required_protocol_failure_fails_entire_page(

@@ -105,6 +105,41 @@ def test_out_of_hours_manual_is_blocked_without_override(config_tree: Path, monk
     assert "outside%20allowed%20bell%20hours" in result.headers["location"]
 
 
+def test_manual_explains_after_hours_and_links_local_receiver(
+    config_tree: Path, monkeypatch
+) -> None:
+    class LateNight(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2027, 2, 2, 23, 0, tzinfo=tz or ZoneInfo("America/Denver"))
+
+    monkeypatch.setattr("bell.web.datetime", LateNight)
+    monkeypatch.setenv("BELL_RECEIVER_DASHBOARD_URL", "http://localhost:9000/")
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+
+    page = client.get("/manual?message=transmission%20completed")
+
+    assert page.status_code == 200
+    assert "It is outside normal bell hours" in page.text
+    assert "select the logged emergency-hours override" in page.text
+    assert 'href="http://localhost:9000/"' in page.text
+    assert "View local receiver result" in page.text
+
+
+def test_invalid_receiver_dashboard_url_is_not_rendered(
+    config_tree: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("BELL_RECEIVER_DASHBOARD_URL", "javascript:alert(1)")
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+
+    page = client.get("/manual?message=transmission%20completed")
+
+    assert page.status_code == 200
+    assert "View local receiver result" not in page.text
+
+
 def test_update_requires_auth_csrf_and_two_step_confirmation(config_tree: Path) -> None:
     client = TestClient(create_app(config_tree, password="test"))
     assert client.get("/updates", follow_redirects=False).status_code == 303

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from bell.config import BellEvent, ConfigLoadError, Destination, load_config
+from bell.config import BellEvent, ConfigLoadError, Destination, PolyCalibration, load_config
 
 
 def test_example_config_is_complete(config_tree: Path) -> None:
@@ -77,4 +77,17 @@ def test_sound_names_cannot_escape_library() -> None:
             port=5060,
             sip_uri="sips:page@example.test",
             sip_host="example.test",
+        )
+
+
+def test_poly_calibration_requires_complete_unique_evidence() -> None:
+    with pytest.raises(ValueError, match="cover every extension byte"):
+        PolyCalibration(
+            extension_profile_id=1,
+            extension_word_count=1,
+            mappings=[{"offset": 0, "source": "channel"}],
+            captured_channels=[23, 24, 25],
+            capture_sha256=["a" * 64, "b" * 64, "c" * 64],
+            captured_at="2026-08-15T12:00:00Z",
+            evidence_id="20260815T120000000000Z-aaaaaaaaaaaa",
         )

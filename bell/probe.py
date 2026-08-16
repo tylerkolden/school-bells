@@ -127,11 +127,22 @@ def join_socket(group: str, port: int, interface: str, timeout: float = 10.0) ->
     return sock
 
 
-def capture(group: str, port: int, interface: str, count: int) -> tuple[list[bytes], list[float]]:
+def capture(
+    group: str,
+    port: int,
+    interface: str,
+    count: int,
+    timeout: float = 10.0,
+) -> tuple[list[bytes], list[float]]:
     packets: list[bytes] = []
     arrivals: list[float] = []
-    with join_socket(group, port, interface) as sock:
+    deadline = time.monotonic() + timeout
+    with join_socket(group, port, interface, timeout) as sock:
         while len(packets) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("capture window expired")
+            sock.settimeout(remaining)
             packet, _address = sock.recvfrom(65535)
             arrivals.append(time.monotonic())
             packets.append(packet)

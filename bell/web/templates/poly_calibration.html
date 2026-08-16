@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Poly capture · School Bell{% endblock %}
+{% block content %}
+<div class="page-heading"><div><span class="eyebrow">Network calibration</span><h1>Guided Poly capture</h1><p class="lede">Let this Raspberry Pi learn the verified Group Page header from real phone-VLAN traffic.</p></div><a class="button secondary" href="/setup#destinations">Back to destinations</a></div>
+{% if message %}<div class="notice info" role="status"><strong>{{ message }}</strong></div>{% endif %}
+{% if error %}<div class="notice danger" role="alert"><strong>Capture did not complete</strong>{{ error }}</div>{% endif %}
+{% if config.settings.poly_group_page_calibration %}<div class="notice info"><strong>Poly Group Page is calibrated.</strong>Captured {{ config.settings.poly_group_page_calibration.captured_channels|length }} known channels on {{ config.settings.poly_group_page_calibration.captured_at.strftime('%Y-%m-%d') }}. A new activation replaces that evidence only after full validation.</div>{% endif %}
+
+<div class="calibration-layout">
+  <section class="card calibration-steps">
+    <span class="overline">Before capturing</span><h2>Prepare a controlled test</h2>
+    <ol><li>Use a quiet maintenance window and notify nearby staff.</li><li>Temporarily mute or unsubscribe horns that must not sound.</li><li>Enable the bell-system kill switch in Setup so scheduled and manual transmissions are blocked.</li><li>Use a known Poly/Yealink paging source. You will repeat this for three distinct channel numbers.</li></ol>
+    <div class="notice warning compact-notice"><strong>No voice is stored.</strong>The Pi discards RTP audio payloads immediately and retains only the packet headers needed to prove the layout.</div>
+  </section>
+
+  <section class="card">
+    <span class="overline">Capture</span><h2>Listen for one known channel</h2>
+    {% if not destinations %}<div class="notice warning"><strong>No enabled multicast destination is available.</strong>Create and enable one in Setup before capture.</div>{% elif config.settings.interface_ip == '0.0.0.0' %}<div class="notice warning"><strong>A real wired interface IP is required.</strong>The local Docker profile cannot hear the phone VLAN. Configure this on the Raspberry Pi.</div>{% elif not config.safety.kill_switch_enabled %}<div class="notice warning"><strong>Enable the kill switch first.</strong>This prevents the bell service from transmitting while you collect known external pages.</div>{% else %}
+    <form action="/setup/poly-calibration/capture" method="post" class="admin-form" data-capture-form><input type="hidden" name="csrf" value="{{ csrf_token }}"><div class="admin-grid"><label class="span-2">Multicast destination<select name="destination_name" required>{% for destination in destinations %}<option value="{{ destination.name }}">{{ destination.name }} — {{ destination.group }}:{{ destination.port }}</option>{% endfor %}</select></label><label>Known channel<input type="number" name="known_channel" min="1" max="25" value="{{ config.zones[0].channel if config.zones else 23 }}" required></label></div><div class="notice info compact-notice"><strong>Timing</strong>Click Start 10-second capture, then immediately trigger a page on exactly the known channel entered above.</div><button class="primary">Start 10-second capture</button></form>
+    {% endif %}
+  </section>
+</div>
+
+<section class="card capture-review">
+  <div class="builder-panel-heading"><div><span class="overline">Evidence</span><h2>Staged channel captures</h2></div><span class="count-badge">{{ captures|length }}</span></div>
+  {% if manifest %}<p class="field-help">{{ manifest.contract.group }}:{{ manifest.contract.port }} on {{ manifest.contract.interface_ip }} · RTP headers only</p>{% endif %}
+  <div class="capture-grid">{% for channel, packets in captures|dictsort %}<article><span class="state state-success">Captured</span><strong>Channel {{ channel }}</strong><small>{{ packets|length }} header packets</small></article>{% else %}<div class="empty-inline">No captures staged yet. Three distinct known channels are required.</div>{% endfor %}</div>
+  {% if derivation_error %}<div class="notice danger"><strong>Evidence is not yet unambiguous.</strong>{{ derivation_error }}</div>{% endif %}
+  {% if candidate %}<div class="notice info"><strong>Verified candidate ready</strong>Profile 0x{{ '%04X'|format(candidate.spec.extension_profile_id) }}, {{ candidate.spec.extension_word_count }} extension word{% if candidate.spec.extension_word_count != 1 %}s{% endif %}, proven by channels {{ candidate.evidence|map(attribute='channel')|join(', ') }}.</div><form action="/setup/poly-calibration/activate" method="post" class="activation-form"><input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="config_hash" value="{{ config_hash }}"><label class="choice"><input type="checkbox" name="confirm_evidence" value="true" required><span><strong>I confirm each capture used the displayed known channel.</strong><small>Activation stores the proven header mapping and reloads the running service. It does not disable the kill switch.</small></span></label><button class="primary">Activate verified calibration</button></form>{% endif %}
+  {% if captures %}<form action="/setup/poly-calibration/clear" method="post" data-confirm="Clear all staged header captures?"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="danger-button">Clear staged captures</button></form>{% endif %}
+</section>
+{% endblock %}
