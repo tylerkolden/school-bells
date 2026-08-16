@@ -94,10 +94,10 @@ def poly_golden_check(config) -> tuple[bool, str]:
     if config is None or config.settings.poly_group_page_calibration is None:
         return False, "not calibrated - run the guided capture in Setup"
     calibration = config.settings.poly_group_page_calibration
-    wire = PolyGroupPage(config.poly_spec)
-    if not wire.calibrated:
+    if not PolyGroupPage(config.poly_spec).calibrated:
         return False, "persisted calibration could not be loaded"
     evidence_dir = config.state_path / "poly-calibration" / "verified" / calibration.evidence_id
+    payload_types: set[int] = set()
     try:
         for channel in calibration.captured_channels:
             path = evidence_dir / f"channel-{channel}.bin"
@@ -106,6 +106,8 @@ def poly_golden_check(config) -> tuple[bool, str]:
                 return False, f"{path.name} contains no packets"
             for packet in packets:
                 parsed = parse_rtp(packet)
+                payload_types.add(parsed.payload_type)
+                wire = PolyGroupPage(config.poly_spec, parsed.payload_type)
                 rebuilt = wire.build_packet(
                     b"",
                     parsed.sequence,
@@ -118,7 +120,13 @@ def poly_golden_check(config) -> tuple[bool, str]:
                     return False, f"generated channel {channel} header does not match evidence"
     except (OSError, ValueError, RuntimeError) as exc:
         return False, f"capture evidence verification failed: {exc}"
-    return True, f"calibrated builder matches {len(calibration.captured_channels)} live captures"
+    if len(payload_types) != 1 or not payload_types <= {0, 8, 9}:
+        return False, f"capture evidence has unsupported or mixed payload types: {sorted(payload_types)}"
+    payloads = ", ".join(str(value) for value in sorted(payload_types))
+    return True, (
+        f"calibrated builder matches {len(calibration.captured_channels)} live captures "
+        f"with RTP payload type {payloads}"
+    )
 
 
 def main() -> int:

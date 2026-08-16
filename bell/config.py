@@ -91,8 +91,6 @@ class Destination(BaseModel):
             raise ValueError("multicast destinations require group")
         if self.protocol == "multicast" and len(self.codecs) != 1:
             raise ValueError("multicast destinations require exactly one codec")
-        if self.wire_format == "poly_group_page" and self.codecs != ["pcmu"]:
-            raise ValueError("Poly Group Page requires PCMU codec")
         if self.protocol == "sip":
             if not self.sip_uri or not self.sip_uri.lower().startswith(("sip:", "sips:")):
                 raise ValueError("SIP destinations require a sip: or sips: sip_uri")
@@ -423,15 +421,6 @@ def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
                 errors.append(
                     f"destination {destination.name!r}: TLS CA file does not exist: {destination.tls_ca_file}"
                 )
-        effective_wire = destination.wire_format or config.settings.wire_format
-        if (
-            destination.protocol == "multicast"
-            and effective_wire == "poly_group_page"
-            and destination.codecs != ["pcmu"]
-        ):
-            errors.append(
-                f"destination {destination.name!r}: Poly Group Page requires PCMU codec"
-            )
     destinations = config.destination_map
     zones = config.zone_map
     schedules = config.schedule_map

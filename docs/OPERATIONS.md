@@ -27,7 +27,8 @@ required and the override is logged at WARNING.
 4. Run `journalctl -u bell-system --since '30 minutes ago'` and find blocked, missed, or failed
    fire records. A bell more than 60 seconds late is intentionally skipped.
 5. From a wired VLAN host, run `python -m bell.listen --iface <ip> --seconds 10 --output test.wav`
-   during a controlled transmission. This confirms packets and playable PCMU on the wire.
+   during a controlled transmission. This confirms packets and playable configured-codec audio on
+   the wire.
 6. Use `sudo tcpdump -ni eth0 udp port <configured-port>` to verify multicast leaves the Pi.
 7. Confirm the T31P multicast subscriptions and Algo Receiver/Poly Group Page configuration.
 8. Ask whether the hosted provider reprovisioned phones; provisioning can wipe local web-UI

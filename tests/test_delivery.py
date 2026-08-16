@@ -104,6 +104,55 @@ def test_poly_multicast_uses_persisted_capture_spec(
     assert report.successful
 
 
+def test_poly_multicast_streams_g722_with_static_payload_type_nine(
+    config_tree: Path, tmp_path: Path, monkeypatch
+) -> None:
+    config = load_config(config_tree)
+    config.settings.interface_ip = "127.0.0.1"
+    destination = config.destination_map["all"]
+    destination.wire_format = "poly_group_page"
+    destination.codecs = ["g722"]
+    add_test_calibration(config)
+    pcmu = tmp_path / "one.ulaw"
+    pcmu.write_bytes(b"p" * 160)
+    g722 = tmp_path / "one.g722"
+    g722.write_bytes(b"g" * 320)
+
+    def fake_transcode(_source, codec):
+        assert codec == "g722"
+        return g722
+
+    class G722Transmitter:
+        def __init__(self, wire, *_args, **kwargs) -> None:
+            assert wire.calibrated
+            assert wire.payload_type == 9
+            assert kwargs["timestamp_step"] == 160
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def send(self, frames, channel, _cancel) -> TransmitResult:
+            assert list(frames) == [b"g" * 160, b"g" * 160]
+            assert channel == 23
+            return TransmitResult(2, 0.04, 0.001, 0.001, {"all": 360}, {}, False)
+
+    monkeypatch.setattr(delivery_module, "transcode", fake_transcode)
+    monkeypatch.setattr(delivery_module, "Transmitter", G722Transmitter)
+    event = config.schedule_map["Regular Day"].events[0]
+    report = DeliveryManager(config, EndpointRegistry()).deliver(
+        pcmu,
+        event,
+        config.zone_map[event.zone],
+        threading.Event(),
+    )
+
+    assert report.successful
+    assert "G722" in report.outcomes[0].detail
+
+
 def test_required_protocol_failure_fails_entire_page(
     config_tree: Path, tmp_path: Path, monkeypatch
 ) -> None:

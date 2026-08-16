@@ -55,14 +55,23 @@ def test_protocol_configuration_rejects_credential_leaks_and_tls_downgrade() -> 
             port=443,
             webhook_url="https://user:password@device/trigger",
         )
-    with pytest.raises(ValueError, match="Poly Group Page requires PCMU"):
+    paging = Destination(
+        name="paging",
+        protocol="multicast",
+        port=5004,
+        group="239.1.2.3",
+        wire_format="poly_group_page",
+        codecs=["g722"],
+    )
+    assert paging.codecs == ["g722"]
+    with pytest.raises(ValueError, match="exactly one codec"):
         Destination(
-            name="paging",
+            name="ambiguous-paging",
             protocol="multicast",
             port=5004,
             group="239.1.2.3",
             wire_format="poly_group_page",
-            codecs=["g722"],
+            codecs=["pcmu", "g722"],
         )
 
 

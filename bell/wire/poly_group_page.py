@@ -50,8 +50,11 @@ SPEC: PolySpec | None = None
 
 
 class PolyGroupPage:
-    def __init__(self, spec: PolySpec | None = None) -> None:
+    def __init__(self, spec: PolySpec | None = None, payload_type: int = 0) -> None:
+        if not 0 <= payload_type <= 127:
+            raise ValueError("payload_type must fit in 7 bits")
         self.spec = SPEC if spec is None else spec
+        self.payload_type = payload_type
 
     @property
     def name(self) -> str:
@@ -76,7 +79,7 @@ class PolyGroupPage:
             )
         if not 1 <= channel <= 25:
             raise ValueError("Poly Group Page channel must be between 1 and 25")
-        second = (0x80 if marker else 0) | 0
+        second = (0x80 if marker else 0) | self.payload_type
         rtp = struct.pack(
             "!BBHII", 0x90, second, seq & 0xFFFF, timestamp & 0xFFFFFFFF, ssrc & 0xFFFFFFFF
         )
