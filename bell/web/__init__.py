@@ -35,7 +35,12 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from bell import __version__
 from bell.audio import AudioProcessingError, AudioToolMissing, prep, probe_audio
-from bell.calibration import CalibrationError, derive_poly_calibration, sanitize_capture
+from bell.calibration import (
+    CalibrationError,
+    derive_poly_calibration,
+    sanitize_capture,
+    valid_header_or_none,
+)
 from bell.config import (
     BellConfig,
     BellEvent,
@@ -917,11 +922,17 @@ def create_app(
                     destination.port,
                     cfg.settings.interface_ip,
                     32,
+                    transform=valid_header_or_none,
                 )
                 headers = sanitize_capture(raw_packets)
             except TimeoutError:
                 query = urlencode(
-                    {"error": "No page packets arrived before the 10-second capture timeout."}
+                    {
+                        "error": (
+                            "No compatible Poly PCMU RTP packets arrived before the "
+                            "10-second capture timeout."
+                        )
+                    }
                 )
                 return RedirectResponse(f"/setup/poly-calibration?{query}", status_code=303)
             except PermissionError:

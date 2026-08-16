@@ -6,7 +6,7 @@ import argparse
 import socket
 import struct
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -133,6 +133,7 @@ def capture(
     interface: str,
     count: int,
     timeout: float = 10.0,
+    transform: Callable[[bytes], bytes | None] | None = None,
 ) -> tuple[list[bytes], list[float]]:
     packets: list[bytes] = []
     arrivals: list[float] = []
@@ -144,8 +145,11 @@ def capture(
                 raise TimeoutError("capture window expired")
             sock.settimeout(remaining)
             packet, _address = sock.recvfrom(65535)
+            retained = transform(packet) if transform is not None else packet
+            if retained is None:
+                continue
             arrivals.append(time.monotonic())
-            packets.append(packet)
+            packets.append(retained)
     return packets, arrivals
 
 

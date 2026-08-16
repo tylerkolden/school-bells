@@ -4,7 +4,12 @@ import struct
 
 import pytest
 
-from bell.calibration import CalibrationError, derive_poly_calibration, header_only
+from bell.calibration import (
+    CalibrationError,
+    derive_poly_calibration,
+    header_only,
+    sanitize_capture,
+)
 
 
 def captured_packet(channel: int, sequence: int, *, changing: int = 0x55) -> bytes:
@@ -39,6 +44,24 @@ def test_discards_captured_voice_payload() -> None:
 
     assert header == packet[:20]
     assert b"voice" not in header
+
+
+def test_ignores_unrelated_datagrams_and_retains_valid_headers() -> None:
+    unrelated = bytes((0x0F,)) + bytes(11)
+    packets = [unrelated, *captures()[23]]
+
+    headers = sanitize_capture(packets)
+
+    assert len(headers) == 8
+    assert all(len(header) == 20 and b"voice" not in header for header in headers)
+
+
+def test_fails_closed_when_too_few_valid_packets_remain() -> None:
+    unrelated = bytes((0x0F,)) + bytes(11)
+    packets = [unrelated, *captures()[23][:7]]
+
+    with pytest.raises(CalibrationError, match=r"accepted 7 of 8"):
+        sanitize_capture(packets)
 
 
 def test_rejects_fewer_than_three_known_channels() -> None:

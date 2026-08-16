@@ -33,7 +33,10 @@ class DerivedCalibration:
 
 def header_only(packet: bytes) -> bytes:
     """Validate a captured packet and discard its audio payload immediately."""
-    parsed = parse_rtp(packet)
+    try:
+        parsed = parse_rtp(packet)
+    except ValueError as exc:
+        raise CalibrationError(f"capture is not a complete RTP packet: {exc}") from exc
     if parsed.version != 2:
         raise CalibrationError("capture is not RTP version 2")
     if parsed.payload_type != 0:
@@ -47,13 +50,34 @@ def header_only(packet: bytes) -> bytes:
     return bytes(packet[: parsed.header_length])
 
 
+def valid_header_or_none(packet: bytes) -> bytes | None:
+    """Discard unrelated traffic and return only a validated RTP header."""
+    try:
+        return header_only(packet)
+    except CalibrationError:
+        return None
+
+
 def sanitize_capture(packets: Sequence[bytes]) -> list[bytes]:
-    """Return validated header-only packets, never retained voice payload."""
+    """Return valid header-only packets while ignoring unrelated multicast traffic."""
     if len(packets) < MIN_PACKETS_PER_CHANNEL:
         raise CalibrationError(
             f"capture needs at least {MIN_PACKETS_PER_CHANNEL} packets; received {len(packets)}"
         )
-    return [header_only(packet) for packet in packets]
+    headers: list[bytes] = []
+    rejected: list[str] = []
+    for packet in packets:
+        try:
+            headers.append(header_only(packet))
+        except CalibrationError as exc:
+            rejected.append(str(exc))
+    if len(headers) < MIN_PACKETS_PER_CHANNEL:
+        detail = f" Last rejected packet: {rejected[-1]}" if rejected else ""
+        raise CalibrationError(
+            f"capture needs at least {MIN_PACKETS_PER_CHANNEL} valid Poly PCMU RTP packets; "
+            f"accepted {len(headers)} of {len(packets)}.{detail}"
+        )
+    return headers
 
 
 def derive_poly_calibration(captures: Mapping[int, Sequence[bytes]]) -> DerivedCalibration:
