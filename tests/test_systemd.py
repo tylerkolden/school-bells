@@ -68,3 +68,8 @@ def test_installer_stages_before_atomic_activation_and_supports_offline_wheels()
     assert "settings.yaml must contain exactly one interface_ip setting" in installer
     unit = (ROOT / "deploy" / "bell-system.service").read_text(encoding="utf-8")
     assert "WorkingDirectory=/opt/bell/current" in unit
+    assert "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in unit
+    assert "AmbientCapabilities=CAP_NET_BIND_SERVICE" in unit
+    assert "CAP_NET_RAW" not in unit
+    assert "CAP_NET_ADMIN" not in unit
+    assert "CAP_SYS_ADMIN" not in unit

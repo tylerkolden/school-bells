@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bell-system"
-version = "0.6.0"
+version = "0.6.1"
 description = "Fail-safe scheduled multicast school bell transmitter"
 readme = "README.md"
 requires-python = ">=3.11"

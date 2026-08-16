@@ -168,3 +168,29 @@ def test_capture_timeout_is_explained_without_storing_evidence(
     assert "No+page+packets+arrived" in response.headers["location"]
     workspace = config_tree.parent / "state" / "poly-calibration"
     assert not list(workspace.glob("channel-*.bin"))
+
+
+def test_capture_permission_error_explains_required_release(
+    config_tree: Path, monkeypatch
+) -> None:
+    enable_capture_mode(config_tree)
+
+    def denied(*_args):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("bell.web.capture_rtp", denied)
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+    page = client.get("/setup/poly-calibration")
+    response = client.post(
+        "/setup/poly-calibration/capture",
+        data={
+            "csrf": hidden(page, "csrf"),
+            "destination_name": "all",
+            "known_channel": "23",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "cannot+listen+on+UDP+port+601" in response.headers["location"]
+    assert "v0.6.1+or+newer" in response.headers["location"]
