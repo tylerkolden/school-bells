@@ -27,9 +27,16 @@ def login(client: TestClient) -> None:
     assert response.status_code == 303
 
 
-def captured_packet(channel: int, sequence: int) -> bytes:
+def captured_packet(channel: int, sequence: int, payload_type: int = 0) -> bytes:
     return (
-        struct.pack("!BBHII", 0x90, 0x80 if sequence == 1 else 0, sequence, sequence * 160, 99)
+        struct.pack(
+            "!BBHII",
+            0x90,
+            (0x80 if sequence == 1 else 0) | payload_type,
+            sequence,
+            sequence * 160,
+            99,
+        )
         + struct.pack("!HH", 0xABCD, 1)
         + bytes((0x44, channel, 0x55, 0))
         + b"voice payload must not persist"
@@ -141,6 +148,46 @@ def test_three_header_only_captures_activate_persisted_spec(
         "channel-25.bin",
     ]
     assert len(list(workspace.glob("channel-*.bin"))) == 3
+
+
+def test_g722_capture_uses_destination_codec(config_tree: Path, monkeypatch) -> None:
+    enable_capture_mode(config_tree)
+    destinations = config_tree / "destinations.yaml"
+    destinations.write_text(
+        destinations.read_text(encoding="utf-8").replace(
+            "codecs: [pcmu]", "codecs: [g722]", 1
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_capture(_group: str, _port: int, _interface: str, count: int, **kwargs):
+        transform = kwargs["transform"]
+        assert transform(captured_packet(25, 1)) is None
+        assert transform(captured_packet(25, 1, 9)) is not None
+        packets = [captured_packet(25, sequence, 9) for sequence in range(1, count + 1)]
+        return packets, [float(index) for index in range(count)]
+
+    monkeypatch.setattr("bell.web.capture_rtp", fake_capture)
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+    page = client.get("/setup/poly-calibration")
+    assert "G722" in page.text
+    response = client.post(
+        "/setup/poly-calibration/capture",
+        data={
+            "csrf": hidden(page, "csrf"),
+            "destination_name": "all",
+            "known_channel": "25",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    workspace = config_tree.parent / "state" / "poly-calibration"
+    manifest = (workspace / "manifest.json").read_text(encoding="utf-8")
+    assert '"codec":"g722"' in manifest
+    stored = load_capture(workspace / "channel-25.bin")
+    assert stored and all(packet[1] & 0x7F == 9 for packet in stored)
 
 
 def test_capture_timeout_is_explained_without_storing_evidence(

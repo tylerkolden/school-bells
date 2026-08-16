@@ -235,7 +235,7 @@ def test_destination_create_update_delete_and_multicast_lock(config_tree: Path) 
     destination = load_config(config_tree).destination_map["all"]
     assert destination.group == "239.10.20.30"
     assert destination.port == 7000
-    assert destination.codecs == ["pcmu"]
+    assert destination.codecs == ["pcma"]
 
     rejected = client.post(
         "/setup/destinations/save",

@@ -197,6 +197,15 @@ document.querySelectorAll("[data-destination-fields]").forEach((container) => {
   const selector = container.querySelector("[data-protocol-select]");
   const wireFormat = container.querySelector('[name="wire_format"]');
   const calibrationCallout = container.querySelector("[data-poly-calibration-callout]");
+  const codecField = container.querySelector("[data-codec-field]");
+  const codecLabel = container.querySelector("[data-codec-label]");
+  const codecOptions = [...container.querySelectorAll("[data-codec-option]")];
+  const normalizeMulticastCodecs = (changed) => {
+    if (selector.value !== "multicast") return;
+    const selected = changed?.checked ? changed : codecOptions.find((option) => option.checked);
+    codecOptions.forEach((option) => { option.checked = option === selected; });
+    if (!selected && codecOptions.length) codecOptions[0].checked = true;
+  };
   const refreshProtocol = () => {
     container.querySelectorAll("[data-protocol-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.protocolPanel !== selector.value;
@@ -216,8 +225,14 @@ document.querySelectorAll("[data-destination-fields]").forEach((container) => {
     if (calibrationCallout) {
       calibrationCallout.hidden = selector.value !== "multicast" || wireFormat?.value !== "poly_group_page";
     }
+    if (codecField) codecField.hidden = selector.value === "http";
+    if (codecLabel) {
+      codecLabel.textContent = selector.value === "multicast" ? "Multicast codec (choose one)" : "SIP codec preference";
+    }
+    normalizeMulticastCodecs();
   };
   selector.addEventListener("change", refreshProtocol);
   wireFormat?.addEventListener("change", refreshProtocol);
+  codecOptions.forEach((option) => option.addEventListener("change", () => normalizeMulticastCodecs(option)));
   refreshProtocol();
 });

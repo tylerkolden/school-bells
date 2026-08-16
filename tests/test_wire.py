@@ -49,3 +49,13 @@ def test_poly_table_builder_with_explicit_test_spec() -> None:
     assert packet[:12] == struct.pack("!BBHII", 0x90, 0, 1, 160, 2)
     assert packet[12:20] == bytes.fromhex("ab cd 00 01 44 18 55 00")
     assert packet[20:] == b"payload"
+
+
+def test_poly_table_builder_uses_selected_static_payload_type() -> None:
+    spec = PolySpec(0xABCD, 1, ((0, 0x44), (1, "channel"), (2, 0x55)))
+    packet = PolyGroupPage(spec, payload_type=9).build_packet(
+        b"g722", 1, 160, 2, False, 25
+    )
+
+    assert packet[1] & 0x7F == 9
+    assert packet[17] == 25

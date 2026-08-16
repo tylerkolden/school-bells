@@ -1,7 +1,8 @@
 # School Bell System
 
 This project runs a scheduled, fail-safe multicast paging transmitter for a Catholic K–12
-school. A Raspberry Pi sends G.711 PCMU audio to Yealink T31P phones and an Algo 8186 horn.
+school. A Raspberry Pi sends configured standards-based RTP audio to Yealink T31P phones and an
+Algo 8186 horn.
 It schedules in local wall-clock time, records every fire attempt in SQLite, refuses late or
 duplicate bells, and exposes a simple front-office UI.
 
@@ -23,9 +24,10 @@ channel is the zone selector.
 | 25 | Everywhere | yes | yes | emergency and all-call |
 
 The Poly/Yealink multicast path defaults to PCMU (G.711 μ-law), 8 kHz mono, RTP payload type 0,
-in 20 ms/160-byte frames. Standards-based SIP and Regular RTP destinations can instead select an
-ordered `codecs` list containing PCMU, PCMA (G.711 A-law), and G.722 wideband. Poly Group Page is
-deliberately restricted to PCMU for receiver compatibility.
+in 20 ms/160-byte frames. Supported RTP codecs are PCMU, PCMA (G.711 A-law), and G.722 wideband.
+SIP uses an ordered preference list; every multicast destination uses exactly one codec selected
+to match its receivers. G.722 uses static payload type 9, 16 kHz audio, and the RFC 3551-required
+8 kHz RTP clock. All supported multicast codecs use 20 ms/160-byte payloads.
 
 ## Architecture
 
@@ -151,7 +153,7 @@ The **Setup** workspace provides dependency-aware administration for standing it
 defaults, date ranges, sounds, zones, delivery destinations, and safety settings. Create, update,
 and delete actions use the same stale-edit detection and rollback pipeline. Referenced sounds,
 zones, and destinations cannot be deleted until their dependents are changed. Multicast edits
-validate an IPv4 multicast address and UDP port while keeping the required PCMU codec fixed.
+validate an IPv4 multicast address and UDP port, and select exactly one receiver-compatible codec.
 Uploaded audio is bounded,
 validated by FFmpeg, normalized, and stored as 8 kHz mono WAV before it enters the library.
 

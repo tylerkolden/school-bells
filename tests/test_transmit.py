@@ -4,9 +4,11 @@ import socket
 import threading
 import time
 from itertools import pairwise
+from pathlib import Path
 
+import bell.transmit as transmit_module
 from bell.probe import parse_rtp
-from bell.transmit import DestinationEndpoint, Transmitter
+from bell.transmit import DestinationEndpoint, TransmitResult, Transmitter
 from bell.wire.plain_rtp import PlainRTP
 
 
@@ -70,3 +72,50 @@ def test_one_failed_destination_does_not_stop_healthy_peer() -> None:
         result = transmitter.send([b"a" * 160, b"b" * 160], 0)
     assert result.destination_errors == {"failed": "simulated interface failure"}
     assert result.destination_bytes["healthy"] == 2 * 172
+
+
+def test_cli_uses_selected_g722_payload_and_clock(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"source")
+    encoded = tmp_path / "source.g722"
+    encoded.write_bytes(b"g" * 320)
+
+    def fake_transcode(path, codec):
+        assert path == source
+        assert codec == "g722"
+        return encoded
+
+    class FakeTransmitter:
+        def __init__(self, wire, _endpoints, _iface, **kwargs) -> None:
+            assert wire.payload_type == 9
+            assert kwargs["timestamp_step"] == 160
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def send(self, frames, channel) -> TransmitResult:
+            assert list(frames) == [b"g" * 160, b"g" * 160]
+            assert channel == 0
+            return TransmitResult(2, 0.04, 0.0, 0.0, {"all": 344}, {}, False)
+
+    monkeypatch.setattr(transmit_module, "transcode", fake_transcode)
+    monkeypatch.setattr(transmit_module, "Transmitter", FakeTransmitter)
+
+    result = transmit_module.main(
+        [
+            "--file",
+            str(source),
+            "--channel",
+            "0",
+            "--format",
+            "plain_rtp",
+            "--codec",
+            "g722",
+            "--dry-run",
+        ]
+    )
+
+    assert result == 0

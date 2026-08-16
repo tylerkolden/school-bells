@@ -17,6 +17,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -34,7 +35,7 @@ from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 from starlette.middleware.sessions import SessionMiddleware
 
 from bell import __version__
-from bell.audio import AudioProcessingError, AudioToolMissing, prep, probe_audio
+from bell.audio import AudioProcessingError, AudioToolMissing, codec_spec, prep, probe_audio
 from bell.calibration import (
     CalibrationError,
     derive_poly_calibration,
@@ -852,15 +853,22 @@ def create_app(
         cfg = config()
         workspace = calibration_workspace(cfg)
         captures = captured_channels(workspace) if workspace.is_dir() else {}
+        manifest = capture_manifest(workspace) if workspace.is_dir() else None
         candidate = None
         derivation_error = None
         if len(captures) >= 3:
             try:
-                candidate = derive_poly_calibration(captures)
-            except CalibrationError as exc:
+                contract = manifest.get("contract", {}) if manifest else {}
+                expected_payload_type = codec_spec(contract.get("codec", "pcmu")).payload_type
+                candidate = derive_poly_calibration(captures, expected_payload_type)
+            except (AudioProcessingError, CalibrationError) as exc:
                 derivation_error = str(exc)
         destinations = [
-            item for item in cfg.destinations if item.protocol == "multicast" and item.enabled
+            item
+            for item in cfg.destinations
+            if item.protocol == "multicast"
+            and item.enabled
+            and (item.wire_format or cfg.settings.wire_format) == "poly_group_page"
         ]
         return render(
             request,
@@ -869,7 +877,7 @@ def create_app(
             config_hash=cfg.hash,
             destinations=destinations,
             captures=captures,
-            manifest=capture_manifest(workspace) if workspace.is_dir() else None,
+            manifest=manifest,
             candidate=candidate,
             derivation_error=derivation_error,
             message=message,
@@ -892,6 +900,9 @@ def create_app(
         destination = cfg.destination_map.get(destination_name)
         if destination is None or destination.protocol != "multicast" or not destination.enabled:
             raise HTTPException(400, "Choose an enabled multicast destination")
+        wire_format = destination.wire_format or cfg.settings.wire_format
+        if wire_format != "poly_group_page":
+            raise HTTPException(400, "Choose a multicast destination using Poly Group Page")
         if not 1 <= known_channel <= 25:
             raise HTTPException(400, "Known Poly channel must be between 1 and 25")
         if cfg.settings.interface_ip == "0.0.0.0":
@@ -901,11 +912,14 @@ def create_app(
                 409,
                 "Enable the transmission kill switch before calibration capture",
             )
+        codec = destination.codecs[0]
+        payload_type = codec_spec(codec).payload_type
         contract = {
             "destination": destination.name,
             "group": destination.group,
             "port": destination.port,
             "interface_ip": cfg.settings.interface_ip,
+            "codec": codec,
         }
         workspace = calibration_workspace(cfg)
         with calibration_lock:
@@ -922,14 +936,17 @@ def create_app(
                     destination.port,
                     cfg.settings.interface_ip,
                     32,
-                    transform=valid_header_or_none,
+                    transform=partial(
+                        valid_header_or_none,
+                        expected_payload_type=payload_type,
+                    ),
                 )
-                headers = sanitize_capture(raw_packets)
+                headers = sanitize_capture(raw_packets, payload_type)
             except TimeoutError:
                 query = urlencode(
                     {
                         "error": (
-                            "No compatible Poly PCMU RTP packets arrived before the "
+                            f"No compatible Poly {codec.upper()} RTP packets arrived before the "
                             "10-second capture timeout."
                         )
                     }
@@ -953,7 +970,7 @@ def create_app(
             save_capture(temporary_capture, headers)
             temporary_capture.replace(capture_path)
             manifest_payload = {
-                "schema": 1,
+                "schema": 2,
                 "contract": contract,
                 "updated_at": datetime.now(UTC).isoformat(),
             }
@@ -1005,6 +1022,7 @@ def create_app(
                     "group": destination.group,
                     "port": destination.port,
                     "interface_ip": cfg.settings.interface_ip,
+                    "codec": destination.codecs[0],
                 }
                 if destination is not None and destination.protocol == "multicast"
                 else None
@@ -1016,8 +1034,9 @@ def create_app(
                 )
             captures = captured_channels(workspace)
             try:
-                derived = derive_poly_calibration(captures)
-            except CalibrationError as exc:
+                expected_payload_type = codec_spec(str(contract.get("codec", ""))).payload_type
+                derived = derive_poly_calibration(captures, expected_payload_type)
+            except (AudioProcessingError, CalibrationError) as exc:
                 raise HTTPException(400, str(exc)) from exc
             captured_at = datetime.now(UTC)
             evidence_id = (
@@ -1310,7 +1329,7 @@ def create_app(
             "port": port,
             "ttl": ttl,
             "wire_format": (wire_format or None) if protocol == "multicast" else None,
-            "codecs": ["pcmu"] if protocol == "multicast" else codecs,
+            "codecs": codecs,
             "group": group.strip() if protocol == "multicast" else None,
             "sip_uri": (sip_uri or None) if protocol == "sip" else None,
             "sip_host": (sip_host or None) if protocol == "sip" else None,

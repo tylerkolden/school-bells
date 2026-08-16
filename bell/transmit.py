@@ -11,7 +11,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from bell.audio import load_frames, transcode
+from bell.audio import CODECS, codec_spec, load_frames, transcode
 from bell.wire import get_wire_format
 from bell.wire.base import StreamState, WireFormat
 
@@ -167,16 +167,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--channel", required=True, type=int)
     parser.add_argument("--iface", default="0.0.0.0")
     parser.add_argument("--format", default="poly_group_page", choices=("plain_rtp", "poly_group_page"))
+    parser.add_argument("--codec", default="pcmu", choices=tuple(CODECS))
     parser.add_argument("--group", default="239.255.255.255")
     parser.add_argument("--port", default=601, type=int)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    raw = transcode(args.file)
+    spec = codec_spec(args.codec)
+    raw = transcode(args.file, args.codec)
     endpoint = DestinationEndpoint("all", args.group, args.port)
     with Transmitter(
-        get_wire_format(args.format), [endpoint], args.iface, dry_run=args.dry_run
+        get_wire_format(args.format, payload_type=spec.payload_type),
+        [endpoint],
+        args.iface,
+        dry_run=args.dry_run,
+        timestamp_step=spec.rtp_clock_rate // 50,
     ) as transmitter:
-        result = transmitter.send(load_frames(raw), args.channel)
+        result = transmitter.send(
+            load_frames(raw, spec.frame_bytes, spec.padding_byte),
+            args.channel,
+        )
     print(result)
     return 0
 

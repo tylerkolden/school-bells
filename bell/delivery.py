@@ -180,7 +180,7 @@ class DeliveryManager:
         wire = (
             PlainRTP(spec.payload_type)
             if wire_name == "plain_rtp"
-            else get_wire_format(wire_name, self.config.poly_spec)
+            else get_wire_format(wire_name, self.config.poly_spec, spec.payload_type)
         )
         try:
             with Transmitter(

@@ -12,9 +12,22 @@ from bell.calibration import (
 )
 
 
-def captured_packet(channel: int, sequence: int, *, changing: int = 0x55) -> bytes:
+def captured_packet(
+    channel: int,
+    sequence: int,
+    *,
+    changing: int = 0x55,
+    payload_type: int = 0,
+) -> bytes:
     return (
-        struct.pack("!BBHII", 0x90, 0x80 if sequence == 1 else 0, sequence, sequence * 160, 99)
+        struct.pack(
+            "!BBHII",
+            0x90,
+            (0x80 if sequence == 1 else 0) | payload_type,
+            sequence,
+            sequence * 160,
+            99,
+        )
         + struct.pack("!HH", 0xABCD, 1)
         + bytes((0x44, channel, changing, 0))
         + b"private voice payload"
@@ -84,3 +97,21 @@ def test_rejects_non_pcmu_and_payload_without_extension() -> None:
 
     with pytest.raises(CalibrationError, match="PCMU"):
         header_only(plain)
+
+
+def test_accepts_configured_g722_and_rejects_codec_mismatch() -> None:
+    packet = captured_packet(25, 1, payload_type=9)
+
+    assert header_only(packet, expected_payload_type=9) == packet[:20]
+    with pytest.raises(CalibrationError, match="configured PCMU"):
+        header_only(packet)
+
+    g722_captures = {
+        channel: [
+            captured_packet(channel, sequence, payload_type=9)
+            for sequence in range(1, 9)
+        ]
+        for channel in (23, 24, 25)
+    }
+    result = derive_poly_calibration(g722_captures, expected_payload_type=9)
+    assert result.spec.mappings[1] == (1, "channel")

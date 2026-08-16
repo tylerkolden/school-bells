@@ -33,7 +33,8 @@ The web console automates capture, privacy filtering, comparison, persistence, a
    Poly/Yealink source.
 4. Select **Start 10-second capture** and immediately trigger that page. Repeat for at least three
    distinct channels. Channels 23, 24, and 25 are the normal school defaults.
-5. The Pi accepts only RTP version 2, PCMU payload type 0, and a consistent RTP extension layout.
+5. The Pi accepts only RTP version 2, the destination's configured static payload type (PCMU 0,
+   PCMA 8, or G.722 9), and a consistent RTP extension layout.
    It discards audio payloads immediately and stores only RTP headers.
 6. If exactly one full-byte channel position and constant values for every other extension byte are
    proven across all packets, review the candidate, confirm the known-channel labels, and activate.
@@ -49,9 +50,9 @@ newer and restart `bell-system`. Linux reserves ports below 1024; the production
 not grant raw-packet capture or network-administration access.
 
 The wizard ignores malformed, control, and unrelated multicast datagrams. It fails closed if fewer
-than eight valid PCMU/Poly RTP packets remain, or on silence, mixed layouts, independently changing
-extension bytes, an address/port change after capture, or fewer than three known channels. It never
-guesses a proprietary header.
+than eight valid configured-codec Poly RTP packets remain, or on silence, mixed layouts,
+independently changing extension bytes, an address/port/codec change after capture, or fewer than
+three known channels. It never guesses a proprietary header.
 
 ## Manual fallback
 
