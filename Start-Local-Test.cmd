@@ -15,6 +15,7 @@ docker compose up --build --detach --wait --wait-timeout 300
 if errorlevel 1 (
   echo.
   echo Startup failed. Run: docker compose logs
+  echo If an older saved test destination is unhealthy, run Reset-Local-Test.cmd.
   pause
   exit /b 1
 )

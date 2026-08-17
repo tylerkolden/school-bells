@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block title %}Software updates — School Bell{% endblock %}
+{% extends "base.html" %}{% block title %}Software updates · {{ brand.school_name }}{% endblock %}
 {% block content %}
 <div class="page-heading"><div><span class="eyebrow">Appliance maintenance</span><h1>Software updates</h1><p class="lede">Install reviewed, immutable production releases from the official GitHub repository.</p></div><span class="health-badge {{ 'healthy' if status.phase in ['up_to_date', 'success'] else 'degraded' if status.phase == 'failed' else '' }}">{{ status.phase|replace('_', ' ')|title }}</span></div>
 {% if queued %}<div class="notice info" role="status" data-auto-refresh="true"><strong>Request queued.</strong> This page will refresh while the appliance checks or installs. A service restart may briefly interrupt the console.</div>{% endif %}

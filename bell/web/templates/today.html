@@ -1,7 +1,68 @@
-{% extends "base.html" %}{% block title %}Today — School Bell{% endblock %}
+{% extends "base.html" %}{% block title %}Today · {{ brand.school_name }}{% endblock %}
 {% block content %}
-<div class="page-heading"><div><span class="eyebrow">{{ now.strftime('%A · %B %d, %Y') }}</span><h1>Today’s bells</h1><p class="lede">{{ plan.schedule_name or "No active schedule" }}</p></div><a class="button primary" href="/manual">Ring a sound now</a></div>
-{% if kill_switch %}<div class="notice danger" role="alert"><strong>Bell transmission is disabled.</strong> The kill switch is on; no scheduled or manual bells can ring.</div>{% endif %}
-{% if plan.reason %}<div class="notice warning"><strong>No bells today.</strong> {{ plan.reason }}</div>{% endif %}
-{% if plan.events %}<section class="schedule-card" aria-labelledby="schedule-heading"><div class="section-heading"><h2 id="schedule-heading">Schedule</h2><span>{{ plan.events|length }} events</span></div><div class="event-list">{% for item in plan.events %}<article class="event {% if next_event and item.key == next_event.key %}next{% endif %}"><time datetime="{{ item.scheduled_at.isoformat() }}">{{ item.scheduled_at.strftime('%I:%M %p') }}</time><div class="event-detail"><strong>{{ item.event.label }}</strong><small>{{ item.event.zone|title }} · {{ item.source }}</small></div>{% if next_event and item.key == next_event.key %}<span class="pill" data-target="{{ item.scheduled_at.isoformat() }}" aria-live="polite">Next</span>{% endif %}</article>{% endfor %}</div></section>{% else %}<section class="empty-state"><h2>The schedule is clear</h2><p>There are no bell events configured for today.</p><a href="/calendar" class="button secondary">Review calendar</a></section>{% endif %}
+<div class="page-heading operations-heading">
+  <div><span class="eyebrow" data-school-date>{{ snapshot.display_date }}</span><h1>Today’s operations</h1><p class="lede">{{ snapshot.schedule or "No active schedule" }}</p></div>
+  <div class="button-row"><a class="button secondary" href="/calendar">Change today</a><a class="button primary" href="/manual">Ring a sound now</a></div>
+</div>
+{% if message %}<div class="notice info" role="status"><strong>{{ message }}</strong></div>{% endif %}
+{% if kill_switch %}<div class="notice danger" role="alert"><strong>Bell transmission is disabled.</strong>The permanent kill switch is on; no scheduled or manual bells can ring.</div>{% endif %}
+{% if snapshot.pause.active %}<div class="notice warning" role="alert" data-pause-notice><strong>Scheduled bells are paused.</strong><span data-pause-detail>{{ snapshot.pause.reason }} · until {{ snapshot.pause.until }}</span></div>{% endif %}
+
+<section class="operations-dashboard" data-operations-dashboard data-server-time="{{ snapshot.server_time }}" data-next-time="{{ snapshot.next_bell.time if snapshot.next_bell else '' }}">
+  <article class="operation-card clock-card">
+    <span class="overline">School time</span>
+    <strong class="school-clock" data-school-clock>{{ now.strftime('%I:%M:%S %p').lstrip('0') }}</strong>
+    <small>{{ snapshot.timezone }} · Pi synchronized time</small>
+  </article>
+  <article class="operation-card next-bell-card">
+    <span class="overline">Next bell</span>
+    {% if snapshot.next_bell %}
+      <strong data-next-label>{{ snapshot.next_bell.label }}</strong>
+      <span class="next-bell-time"><b data-next-absolute>{{ snapshot.next_bell.display_day }} · {{ snapshot.next_bell.display_time }}</b><em data-next-countdown>Calculating…</em></span>
+      <small data-next-detail>{{ snapshot.next_bell.zone|title }} · {{ snapshot.next_bell.sound }}</small>
+    {% else %}
+      <strong data-next-label>No bell scheduled</strong><span class="next-bell-time"><b data-next-absolute>—</b><em data-next-countdown>None in the next year</em></span><small data-next-detail>Review the calendar before the next school day.</small>
+    {% endif %}
+  </article>
+  <article class="operation-card readiness-card {{ 'ready' if snapshot.ready else 'blocked' }}" data-readiness-card>
+    <span class="overline">Transmission readiness</span>
+    <strong data-readiness-label>{{ 'Ready' if snapshot.ready else 'Needs attention' }}</strong>
+    <small data-readiness-detail>{{ 'All required checks pass' if snapshot.ready else snapshot.blocked_reasons|join(' · ') }}</small>
+  </article>
+  <article class="operation-card last-bell-card">
+    <span class="overline">Last transmission</span>
+    {% if snapshot.last_fire %}<strong data-last-label>{{ snapshot.last_fire.event_label }}</strong><small data-last-detail>{{ snapshot.last_fire.result|title }} · {{ snapshot.last_fire.timestamp }}</small>{% else %}<strong data-last-label>None recorded</strong><small data-last-detail>No transmission has completed since service start.</small>{% endif %}
+  </article>
+</section>
+
+{% if snapshot.active_page %}
+<section class="notice danger active-page" data-active-page role="alert">
+  <div><strong>Audio is playing now: <span data-active-label>{{ snapshot.active_page.label }}</span></strong><span>Stopping ends new audio packets at the next safe cancellation point.</span></div>
+  <form action="/operations/stop" method="post" data-confirm="Stop the active page now?"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="danger-button">Stop active page</button></form>
+</section>
+{% endif %}
+
+<div class="today-layout">
+  <section class="schedule-card" aria-labelledby="upcoming-heading">
+    <div class="section-heading"><h2 id="upcoming-heading">Coming up</h2><span data-upcoming-count>{{ snapshot.upcoming|length }} shown</span></div>
+    <div class="event-list" data-upcoming-list>
+      {% for item in snapshot.upcoming %}<article class="event {% if loop.first %}next{% endif %}"><time datetime="{{ item.time }}">{{ item.display_time }}</time><div class="event-detail"><strong>{{ item.label }}</strong><small>{{ item.display_day }} · {{ item.zone|title }} · {{ item.sound }}</small></div>{% if loop.first %}<span class="pill">Next</span>{% endif %}</article>{% else %}<div class="empty-inline">No bell is scheduled in the next year.</div>{% endfor %}
+    </div>
+  </section>
+
+  <aside class="card quick-controls" aria-labelledby="controls-heading">
+    <span class="overline">Immediate control</span><h2 id="controls-heading">Pause scheduled bells</h2>
+    <p>Use a temporary pause for an assembly, testing, or an unexpected closure. Missed bells are never replayed.</p>
+    <form action="/operations/pause" method="post" data-confirm="Apply this bell pause now?">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="config_hash" value="{{ snapshot.config_hash }}">
+      <label>Duration<select name="duration" required><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">60 minutes</option><option value="today">Rest of today</option></select></label>
+      <label>Reason<input name="reason" maxlength="200" placeholder="Assembly, testing, closure…" required></label>
+      <button class="primary">Pause bells</button>
+    </form>
+    {% if snapshot.pause.active %}<form action="/operations/pause" method="post" class="resume-form"><input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="config_hash" value="{{ snapshot.config_hash }}"><input type="hidden" name="duration" value="resume"><button class="secondary">Resume scheduled bells</button></form>{% endif %}
+    <a href="/status" class="text-link">Open detailed system status →</a>
+  </aside>
+</div>
+
+{% if plan.reason %}<div class="notice warning"><strong>No bells today.</strong>{{ plan.reason }}</div>{% endif %}
 {% endblock %}

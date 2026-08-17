@@ -1,23 +1,25 @@
 <!doctype html>
 <html lang="en">
+{% set display_brand = brand if brand is defined else {'school_name': 'School Bell', 'subtitle': 'Operations console', 'has_logo': false} %}
+{% set display_user = current_user if current_user is defined else {'username': 'admin', 'role': 'admin'} %}
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#102a43">
-  <title>{% block title %}School Bell{% endblock %}</title>
+  <title>{% block title %}{{ display_brand.school_name }}{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', path='favicon.svg') }}" type="image/svg+xml">
-  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}?v=0.7.0">
-  <script defer src="{{ url_for('static', path='app.js') }}?v=0.7.0"></script>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}?v=0.8.0">
+  <script defer src="{{ url_for('static', path='app.js') }}?v=0.8.0"></script>
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to main content</a>
 {% if authenticated %}
 <header class="app-header">
-  <a class="brand" href="/" aria-label="School Bell home"><span class="brand-mark" aria-hidden="true">B</span><span><strong>School Bell</strong><small>Operations console</small></span></a>
-  <nav aria-label="Primary navigation"><a href="/">Today</a><a href="/calendar">Calendar</a><a href="/schedules">Schedules</a><a href="/setup">Setup</a><a href="/manual">Ring now</a><a href="/status">System status</a><a href="/updates">Updates</a><form action="/logout" method="post"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="nav-button">Sign out</button></form></nav>
+  <a class="brand" href="/" aria-label="{{ display_brand.school_name }} home">{% if display_brand.has_logo %}<img class="brand-logo" src="/branding/logo.png" alt="">{% else %}<span class="brand-mark" aria-hidden="true">B</span>{% endif %}<span><strong>{{ display_brand.school_name }}</strong><small>{{ display_brand.subtitle }}</small></span></a>
+  <nav aria-label="Primary navigation"><a href="/">Today</a><a href="/calendar">Calendar</a><a href="/schedules">Schedules</a>{% if display_user.role == 'admin' %}<a href="/setup">Setup</a>{% endif %}<a href="/manual">Ring now</a><a href="/status">System status</a>{% if display_user.role == 'admin' %}<a href="/recovery">Recovery</a><a href="/updates">Updates</a><a href="/account">Accounts</a>{% endif %}<form action="/logout" method="post"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="nav-button">Sign out · {{ display_user.username }}</button></form></nav>
 </header>
 {% endif %}
 <main id="main-content" class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
-<footer><span>School Bell Operations</span><span>Times shown in school local time</span></footer>
+<footer><span>{{ display_brand.school_name }} · {{ display_brand.subtitle }}</span><span>Times shown in school local time</span></footer>
 </body>
 </html>

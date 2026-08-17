@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Setup · School Bell{% endblock %}
+{% block title %}Setup · {{ brand.school_name }}{% endblock %}
 {% macro tokens() -%}
 <input type="hidden" name="csrf" value="{{ csrf_token }}">
 <input type="hidden" name="config_hash" value="{{ config_hash }}">
@@ -45,7 +45,17 @@
 {% block content %}
 <div class="page-heading"><div><span class="eyebrow">Administration</span><h1>System setup</h1><p class="lede">Manage the reusable building blocks behind schedules and paging.</p></div></div>
 {% if message %}<div class="notice info" role="status"><strong>{{ message }}</strong></div>{% endif %}
-<nav class="setup-jump" aria-label="Setup sections"><a href="#standing-items">Standing items</a><a href="#calendar-rules">Calendar rules</a><a href="#sounds">Sounds</a><a href="#zones">Zones</a><a href="#destinations">Destinations</a><a href="#settings">Safety &amp; settings</a></nav>
+<nav class="setup-jump" aria-label="Setup sections"><a href="#branding">Branding</a><a href="#standing-items">Standing items</a><a href="#calendar-rules">Calendar rules</a><a href="#sounds">Sounds</a><a href="#zones">Zones</a><a href="#destinations">Destinations</a><a href="#settings">Safety &amp; settings</a></nav>
+
+<section id="branding" class="admin-section">
+  <div class="admin-section-heading"><div><span class="overline">Identity</span><h2>School branding</h2><p>Customize the console without changing the short Poly paging caller ID.</p></div></div>
+  <form action="/setup/branding/save" method="post" enctype="multipart/form-data" class="card admin-form branding-form">
+    {{ tokens() }}
+    <div class="branding-preview">{% if config.logo_path and config.logo_path.is_file() %}<img src="/branding/logo.png" alt="Current {{ config.settings.school_name }} logo">{% else %}<span class="brand-mark" aria-hidden="true">B</span>{% endif %}<div><strong>{{ config.settings.school_name }}</strong><small>{{ config.settings.console_subtitle }}</small></div></div>
+    <div class="admin-grid"><label class="span-2">School display name<input name="school_name" value="{{ config.settings.school_name }}" maxlength="100" required></label><label>Console subtitle<input name="console_subtitle" value="{{ config.settings.console_subtitle }}" maxlength="100" required></label><label class="span-2">Logo image<input type="file" name="logo_file" accept="image/png,image/jpeg,image/webp"><small class="field-help">PNG, JPEG, or WebP; maximum 2 MiB. The image is rewritten as a safe bounded PNG.</small></label>{% if config.settings.logo_filename %}<label class="check-field danger-check"><input type="checkbox" name="remove_logo"> Remove current logo</label>{% endif %}</div>
+    <div class="admin-actions"><button class="primary">Save branding</button></div>
+  </form>
+</section>
 
 <section id="standing-items" class="admin-section">
   <div class="admin-section-heading"><div><span class="overline">Daily automation</span><h2>Standing items</h2><p>Events added to every active schedule day, such as prayer or announcements.</p></div><a class="button primary" href="/setup?new_standing=true#standing-items">Add standing item</a></div>
@@ -88,6 +98,9 @@
       <label>Phone VLAN interface IP<input name="interface_ip" value="{{ config.settings.interface_ip }}" required></label>
       <label>Default wire format<select name="wire_format"><option value="poly_group_page"{% if config.settings.wire_format == 'poly_group_page' %} selected{% endif %}>Poly Group Page</option><option value="plain_rtp"{% if config.settings.wire_format == 'plain_rtp' %} selected{% endif %}>Plain RTP</option></select></label>
       <label>Poly caller ID<input name="poly_caller_id" value="{{ config.settings.poly_caller_id }}" minlength="1" maxlength="13" pattern="[ -~]+" required><small class="field-help">Shown on compatible phones; 1–13 ASCII characters.</small></label>
+      <label class="span-2">Operational alert webhook<input type="url" name="alert_webhook_url" value="{{ config.settings.alert_webhook_url or '' }}" placeholder="https://alerts.example.org/bell"><small class="field-help">Optional POST notification for failed bells and readiness changes.</small></label>
+      <label>Webhook secret environment variable<input name="alert_webhook_secret_env" value="{{ config.settings.alert_webhook_secret_env or '' }}" placeholder="BELL_ALERT_WEBHOOK_SECRET"></label>
+      <label class="check-field"><input type="checkbox" name="alert_allow_insecure_http"{% if config.settings.alert_allow_insecure_http %} checked{% endif %}> Allow plain HTTP alert webhook</label>
       <label>Endpoint check interval<input type="number" name="endpoint_check_interval_seconds" value="{{ config.settings.endpoint_check_interval_seconds }}" min="15" max="3600"></label>
       <label>API requests per minute<input type="number" name="api_rate_limit_per_minute" value="{{ config.settings.api_rate_limit_per_minute }}" min="1" max="120"></label>
       <label>Maximum source audio seconds<input type="number" name="max_audio_seconds" value="{{ config.settings.max_audio_seconds }}" min="0.25" max="600" step="0.25"></label>
@@ -104,5 +117,6 @@
     </div>
     <div class="admin-actions"><a class="button secondary" href="/setup#settings">Reload saved settings</a><button class="primary">Save &amp; activate settings</button></div>
   </form>
+  {% if config.settings.alert_webhook_url %}<form action="/setup/alerts/test" method="post" class="admin-actions"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="secondary">Send test operational alert</button></form>{% endif %}
 </section>
 {% endblock %}

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import calendar as calendar_module
+import csv
 import hashlib
+import io
 import json
 import logging
 import mimetypes
@@ -11,6 +14,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import tempfile
 import threading
 import time
@@ -25,7 +29,7 @@ from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -35,7 +39,10 @@ from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 from starlette.middleware.sessions import SessionMiddleware
 
 from bell import __version__
+from bell.alerts import AlertDispatcher
 from bell.audio import AudioProcessingError, AudioToolMissing, codec_spec, prep, probe_audio
+from bell.auth import AuthError, AuthStore
+from bell.branding import BrandingError, normalize_logo
 from bell.calibration import (
     CalibrationError,
     derive_poly_calibration,
@@ -58,13 +65,20 @@ from bell.config import (
 )
 from bell.probe import capture as capture_rtp
 from bell.probe import load_capture, save_capture
+from bell.recovery import (
+    RecoveryError,
+    create_portable_backup,
+    create_support_bundle,
+    restore_portable_backup,
+)
 from bell.safety import evaluate_fire, within_allowed_hours
-from bell.scheduler import BellScheduler, PlannedEvent, resolve_day
+from bell.scheduler import BellScheduler, PlannedEvent, resolve_day, upcoming_events
 from bell.update import UpdateRequestError, load_update_status, queue_update_request
 
 LOGGER = logging.getLogger(__name__)
 ReloadCallback = Callable[[], None]
 HealthProvider = Callable[[], dict[str, Any]]
+CancelCallback = Callable[[str], bool]
 
 
 class APITrigger(BaseModel):
@@ -117,6 +131,7 @@ def create_app(
     scheduler: BellScheduler | None = None,
     reload_callback: ReloadCallback | None = None,
     health_provider: HealthProvider | None = None,
+    cancel_callback: CancelCallback | None = None,
     password: str | None = None,
 ) -> FastAPI:
     directory = Path(config_dir).resolve()
@@ -145,15 +160,12 @@ def create_app(
     signer = URLSafeTimedSerializer(secret, salt="bell-manual-confirm")
     update_signer = URLSafeTimedSerializer(secret, salt="bell-update-confirm")
     app = FastAPI(title="School Bell Office", docs_url=None, redoc_url=None)
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=secret,
-        same_site="strict",
-        https_only=secure_transport,
-    )
     assets = Path(__file__).parent
     app.mount("/static", StaticFiles(directory=assets / "static"), name="static")
     templates = Jinja2Templates(directory=assets / "templates")
+    auth_store = AuthStore(
+        load_config(directory).state_path / "auth" / "users.json", configured_password
+    )
     app.state.config_dir = directory
     app.state.scheduler = scheduler
     rate_limiter = RateLimiter(load_config(directory).settings.api_rate_limit_per_minute)
@@ -174,7 +186,23 @@ def create_app(
     async def security_headers(request: Request, call_next):
         started = time.monotonic()
         request_id = secrets.token_hex(8)
-        response = await call_next(request)
+        restricted = request.url.path.startswith(("/setup", "/updates", "/recovery", "/account"))
+        if (
+            restricted
+            and request.session.get("authenticated")
+            and request.session.get("role", "admin") != "admin"
+        ):
+            response = templates.TemplateResponse(
+                request,
+                "error.html",
+                {
+                    **template_identity(request),
+                    "message": "Administrator access is required for this area.",
+                },
+                status_code=403,
+            )
+        else:
+            response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -200,6 +228,15 @@ def create_app(
         )
         return response
 
+    # Added after the HTTP middleware so session data is available to its pre-route role guard.
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=secret,
+        same_site="strict",
+        https_only=secure_transport,
+        max_age=8 * 60 * 60,
+    )
+
     def config() -> BellConfig:
         return load_config(directory)
 
@@ -216,6 +253,7 @@ def create_app(
             raise HTTPException(status_code=403, detail="Invalid or missing form security token")
 
     def render(request: Request, name: str, **context: Any) -> HTMLResponse:
+        cfg = config()
         return templates.TemplateResponse(
             request,
             name,
@@ -223,6 +261,15 @@ def create_app(
                 "authenticated": True,
                 "csrf_token": csrf_token(request),
                 "receiver_dashboard_url": receiver_dashboard_url or None,
+                "brand": {
+                    "school_name": cfg.settings.school_name,
+                    "subtitle": cfg.settings.console_subtitle,
+                    "has_logo": bool(cfg.logo_path and cfg.logo_path.is_file()),
+                },
+                "current_user": {
+                    "username": request.session.get("username", "admin"),
+                    "role": request.session.get("role", "admin"),
+                },
                 **context,
             },
         )
@@ -230,6 +277,113 @@ def create_app(
     def require_auth(request: Request) -> None:
         if not request.session.get("authenticated"):
             raise HTTPException(status_code=303, headers={"Location": "/login"})
+        if request.session.get("auth_revision", 0) != auth_store.revision:
+            request.session.clear()
+            raise HTTPException(status_code=303, headers={"Location": "/login"})
+
+    def record_audit(action: str, target: str, detail: str) -> None:
+        if scheduler:
+            try:
+                scheduler.state.record_audit(
+                    action,
+                    target,
+                    detail,
+                    datetime.now(ZoneInfo(config().settings.timezone)),
+                )
+            except (OSError, sqlite3.Error):
+                # A full or temporarily unavailable state volume must not turn an
+                # already-successful configuration write into a misleading failure.
+                LOGGER.exception("audit_record_failed")
+
+    def template_identity(request: Request) -> dict[str, Any]:
+        """Common safe template context, including for handled error responses."""
+        try:
+            cfg = config()
+            brand = {
+                "school_name": cfg.settings.school_name,
+                "subtitle": cfg.settings.console_subtitle,
+                "has_logo": bool(cfg.logo_path and cfg.logo_path.is_file()),
+            }
+        except ConfigLoadError:
+            brand = {
+                "school_name": "School Bell",
+                "subtitle": "Operations Console",
+                "has_logo": False,
+            }
+        return {
+            "authenticated": bool(request.session.get("authenticated")),
+            "csrf_token": csrf_token(request),
+            "brand": brand,
+            "current_user": {
+                "username": request.session.get("username", "admin"),
+                "role": request.session.get("role", "admin"),
+            },
+        }
+
+    def operations_snapshot(cfg: BellConfig | None = None) -> dict[str, Any]:
+        current = cfg or config()
+        now = datetime.now(ZoneInfo(current.settings.timezone))
+        plan = resolve_day(now.date(), current)
+        upcoming = upcoming_events(current, now, limit=5)
+        health = (
+            health_provider()
+            if health_provider
+            else {
+                "ready": True,
+                "readiness_reasons": [],
+                "last_fire": None,
+                "active_page": None,
+            }
+        )
+        pause_active = bool(current.safety.pause_until and now < current.safety.pause_until)
+        events = [
+            {
+                "time": item.scheduled_at.isoformat(),
+                "display_time": item.scheduled_at.strftime("%I:%M %p").lstrip("0"),
+                "display_day": (
+                    "Today"
+                    if item.scheduled_at.date() == now.date()
+                    else item.scheduled_at.strftime("%a, %b %d")
+                ),
+                "label": item.event.label,
+                "zone": item.event.zone,
+                "sound": item.event.sound,
+                "source": item.source,
+                "priority": item.event.priority,
+            }
+            for item in upcoming
+        ]
+        blocked_reasons: list[str] = []
+        if current.safety.kill_switch_enabled:
+            blocked_reasons.append("kill switch enabled")
+        if pause_active:
+            blocked_reasons.append(f"paused: {current.safety.pause_reason}")
+        if not health.get("ready", True):
+            blocked_reasons.extend(str(item) for item in health.get("readiness_reasons", []))
+        return {
+            "server_time": now.isoformat(),
+            "timezone": current.settings.timezone,
+            "date": now.date().isoformat(),
+            "display_date": now.strftime("%A · %B %d, %Y"),
+            "schedule": plan.schedule_name,
+            "today_reason": plan.reason,
+            "today_event_count": len(plan.events),
+            "next_bell": events[0] if events else None,
+            "upcoming": events,
+            "ready": bool(health.get("ready", True)) and not blocked_reasons,
+            "blocked_reasons": blocked_reasons,
+            "last_fire": health.get("last_fire"),
+            "active_page": health.get("active_page"),
+            "kill_switch": current.safety.kill_switch_enabled,
+            "pause": {
+                "active": pause_active,
+                "until": current.safety.pause_until.isoformat()
+                if current.safety.pause_until
+                else None,
+                "reason": current.safety.pause_reason,
+            },
+            "config_hash": current.hash,
+        }
 
     def api_scope(request: Request) -> str:
         supplied = request.headers.get("X-Bell-API-Key", "")
@@ -250,7 +404,7 @@ def create_app(
         return templates.TemplateResponse(
             request,
             "error.html",
-            {"authenticated": bool(request.session.get("authenticated")), "message": str(exc)},
+            {**template_identity(request), "message": str(exc)},
             status_code=400,
         )
 
@@ -266,8 +420,7 @@ def create_app(
             request,
             "error.html",
             {
-                "authenticated": bool(request.session.get("authenticated")),
-                "csrf_token": csrf_token(request),
+                **template_identity(request),
                 "message": str(exc.detail),
             },
             status_code=exc.status_code,
@@ -276,15 +429,35 @@ def create_app(
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request, failed: bool = False) -> HTMLResponse:
+        cfg = config()
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"authenticated": False, "failed": failed, "csrf_token": csrf_token(request)},
+            {
+                "authenticated": False,
+                "failed": failed,
+                "csrf_token": csrf_token(request),
+                "brand": {
+                    "school_name": cfg.settings.school_name,
+                    "subtitle": cfg.settings.console_subtitle,
+                    "has_logo": bool(cfg.logo_path and cfg.logo_path.is_file()),
+                },
+            },
+        )
+
+    @app.get("/branding/logo.png")
+    def branding_logo() -> FileResponse:
+        cfg = config()
+        if cfg.logo_path is None or not cfg.logo_path.is_file():
+            raise HTTPException(404, "No school logo is configured")
+        return FileResponse(
+            cfg.logo_path, media_type="image/png", content_disposition_type="inline"
         )
 
     @app.post("/login")
     def login(
         request: Request,
+        username: str = Form(default="admin"),
         submitted_password: str = Form(),
         csrf: str = Form(),
     ) -> RedirectResponse:
@@ -295,8 +468,15 @@ def create_app(
                 "ui_action",
                 extra={"action": "login", "result": "rate_limited", "client": client_address},
             )
-            raise HTTPException(status_code=429, detail="Too many sign-in attempts. Try again later.")
-        if not secrets.compare_digest(submitted_password, configured_password):
+            raise HTTPException(
+                status_code=429, detail="Too many sign-in attempts. Try again later."
+            )
+        try:
+            authenticated_user = auth_store.verify(username, submitted_password)
+        except AuthError as exc:
+            LOGGER.exception("account_database_unreadable")
+            raise HTTPException(503, str(exc)) from exc
+        if authenticated_user is None:
             LOGGER.warning(
                 "ui_action",
                 extra={"action": "login", "result": "denied", "client": client_address},
@@ -305,11 +485,70 @@ def create_app(
         request.session.clear()
         request.session["authenticated"] = True
         request.session["csrf_token"] = secrets.token_urlsafe(32)
+        request.session["username"] = authenticated_user.username
+        request.session["role"] = authenticated_user.role
+        request.session["auth_revision"] = auth_store.revision
         LOGGER.info(
             "ui_action",
             extra={"action": "login", "result": "success", "client": client_address},
         )
         return RedirectResponse("/", status_code=303)
+
+    @app.get("/account", response_class=HTMLResponse)
+    def account_page(request: Request, message: str | None = None) -> HTMLResponse:
+        require_auth(request)
+        return render(request, "account.html", users=auth_store.users(), message=message)
+
+    @app.post("/account/password")
+    def account_password(
+        request: Request,
+        current_password: str = Form(),
+        new_password: str = Form(),
+        confirm_password: str = Form(),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        username = str(request.session.get("username", "admin"))
+        role = str(request.session.get("role", "admin"))
+        if auth_store.verify(username, current_password) is None:
+            raise HTTPException(400, "Current password is incorrect")
+        if new_password != confirm_password:
+            raise HTTPException(400, "New password confirmation does not match")
+        try:
+            auth_store.set_password(username, role, new_password)
+        except AuthError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        request.session.clear()
+        return RedirectResponse("/login", status_code=303)
+
+    @app.post("/account/operator")
+    def account_operator(
+        request: Request,
+        current_password: str = Form(),
+        operator_password: str = Form(),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        if auth_store.verify("admin", current_password) is None:
+            raise HTTPException(400, "Administrator password is incorrect")
+        try:
+            if not auth_store.path.is_file():
+                auth_store.set_password("admin", "admin", current_password)
+            auth_store.set_password("operator", "operator", operator_password)
+        except AuthError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        request.session.clear()
+        return RedirectResponse("/login", status_code=303)
+
+    @app.post("/account/operator/delete")
+    def account_operator_delete(request: Request, csrf: str = Form()) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        auth_store.delete_user("operator")
+        request.session.clear()
+        return RedirectResponse("/login", status_code=303)
 
     @app.post("/logout")
     def logout(request: Request, csrf: str = Form()) -> RedirectResponse:
@@ -322,24 +561,116 @@ def create_app(
     def today(request: Request) -> HTMLResponse:
         require_auth(request)
         cfg = config()
-        now = datetime.now(ZoneInfo(cfg.settings.timezone))
+        snapshot = operations_snapshot(cfg)
+        now = datetime.fromisoformat(snapshot["server_time"])
         plan = resolve_day(now.date(), cfg)
-        next_event = next((item for item in plan.events if item.scheduled_at > now), None)
         return render(
             request,
             "today.html",
+            config=cfg,
+            snapshot=snapshot,
             plan=plan,
             now=now,
-            next_event=next_event,
             kill_switch=cfg.safety.kill_switch_enabled,
+            message=request.query_params.get("message"),
         )
 
+    @app.get("/operations/snapshot")
+    def operations_snapshot_route(request: Request) -> JSONResponse:
+        require_auth(request)
+        return JSONResponse(operations_snapshot())
+
+    @app.post("/operations/stop")
+    def operations_stop(request: Request, csrf: str = Form()) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        if cancel_callback is None:
+            raise HTTPException(503, "Active-page control is unavailable")
+        stopped = cancel_callback("front-office operator stop")
+        LOGGER.warning(
+            "ui_action",
+            extra={"action": "active_page_stop", "result": "requested" if stopped else "idle"},
+        )
+        record_audit(
+            "active_page_stop", "active page", "requested" if stopped else "no page active"
+        )
+        message = (
+            "Stop requested for the active page." if stopped else "No page is currently active."
+        )
+        return RedirectResponse(f"/?{urlencode({'message': message})}", status_code=303)
+
+    @app.post("/operations/pause")
+    def operations_pause(
+        request: Request,
+        duration: str = Form(),
+        reason: str = Form(default=""),
+        config_hash: str = Form(default=""),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        cfg = config()
+        now = datetime.now(ZoneInfo(cfg.settings.timezone))
+        normalized_reason = reason.strip()
+        if duration == "resume":
+            pause_until = None
+            normalized_reason = ""
+        elif duration == "today":
+            pause_until = datetime.combine(
+                now.date() + timedelta(days=1), datetime.min.time(), now.tzinfo
+            )
+        elif duration in {"15", "30", "60"}:
+            pause_until = now + timedelta(minutes=int(duration))
+        else:
+            raise HTTPException(400, "Choose a valid pause duration")
+        if pause_until is not None and not normalized_reason:
+            raise HTTPException(400, "Enter a reason for pausing bells")
+
+        def mutate(document: Any, _current: BellConfig) -> None:
+            safety = document.setdefault("safety", {})
+            safety["pause_until"] = pause_until.isoformat() if pause_until else None
+            safety["pause_reason"] = normalized_reason or None
+
+        write_config_document("settings.yaml", "settings", config_hash, mutate)
+        if pause_until is not None and cancel_callback:
+            cancel_callback(f"bells paused: {normalized_reason}")
+        LOGGER.warning(
+            "ui_action",
+            extra={
+                "action": "bells_resume" if pause_until is None else "bells_pause",
+                "result": "success",
+                "until": pause_until.isoformat() if pause_until else None,
+            },
+        )
+        record_audit(
+            "bells_resume" if pause_until is None else "bells_pause",
+            "scheduler",
+            normalized_reason or "temporary pause cleared",
+        )
+        message = "Scheduled bells resumed." if pause_until is None else "Scheduled bells paused."
+        return RedirectResponse(f"/?{urlencode({'message': message})}", status_code=303)
+
     @app.get("/calendar", response_class=HTMLResponse)
-    def calendar_page(request: Request, selected: date | None = None) -> HTMLResponse:
+    def calendar_page(
+        request: Request,
+        selected: date | None = None,
+        month: str | None = None,
+    ) -> HTMLResponse:
         require_auth(request)
         cfg = config()
         today_local = datetime.now(ZoneInfo(cfg.settings.timezone)).date()
         chosen = selected or today_local
+        if month:
+            try:
+                month_start = date.fromisoformat(f"{month}-01")
+            except ValueError as exc:
+                raise HTTPException(400, "Month must use YYYY-MM format") from exc
+        else:
+            month_start = chosen.replace(day=1)
+        grid_start = month_start - timedelta(days=(month_start.weekday() + 1) % 7)
+        month_days = [resolve_day(grid_start + timedelta(days=offset), cfg) for offset in range(42)]
+        previous_month = (month_start - timedelta(days=1)).replace(day=1)
+        next_month = (month_start + timedelta(days=32)).replace(day=1)
         days = [resolve_day(today_local + timedelta(days=offset), cfg) for offset in range(14)]
         direct_schedule = cfg.calendar.overrides.get(chosen, "")
         direct_reason = cfg.calendar.no_bell_dates.get(chosen, "")
@@ -354,6 +685,14 @@ def create_app(
             direct_reason=direct_reason,
             config_hash=cfg.hash,
             tomorrow=today_local + timedelta(days=1),
+            today=today_local,
+            month_days=month_days,
+            month_start=month_start,
+            month_label=month_start.strftime("%B %Y"),
+            previous_month=previous_month.strftime("%Y-%m"),
+            next_month=next_month.strftime("%Y-%m"),
+            current_month=month_start.month,
+            selected_plan=resolve_day(chosen, cfg),
         )
 
     def write_config_document(
@@ -426,7 +765,9 @@ def create_app(
                     status_code=500,
                     detail="The change could not be activated. The previous configuration was restored.",
                 ) from exc
-            backups = sorted(backup_dir.glob(f"{backup_prefix}-*.yaml"), key=lambda item: item.stat().st_mtime)
+            backups = sorted(
+                backup_dir.glob(f"{backup_prefix}-*.yaml"), key=lambda item: item.stat().st_mtime
+            )
             for old_backup in backups[:-30]:
                 try:
                     old_backup.unlink()
@@ -436,6 +777,7 @@ def create_app(
                         extra={"path": str(old_backup)},
                         exc_info=True,
                     )
+            record_audit("configuration_change", backup_prefix, f"activated {refreshed.hash}")
             return refreshed
 
     def write_calendar(
@@ -490,9 +832,96 @@ def create_app(
         )
         LOGGER.info(
             "ui_action",
-            extra={"action": "calendar_change", "target": selected.isoformat(), "result": "success"},
+            extra={
+                "action": "calendar_change",
+                "target": selected.isoformat(),
+                "result": "success",
+            },
         )
         return RedirectResponse(f"/calendar?selected={selected.isoformat()}", status_code=303)
+
+    @app.post("/calendar/bulk")
+    def calendar_bulk_save(
+        request: Request,
+        start: date = Form(),  # noqa: B008
+        end: date = Form(),  # noqa: B008
+        bulk_action: str = Form(),
+        schedule_name: str = Form(default=""),
+        no_bell_reason: str = Form(default=""),
+        config_hash: str = Form(default=""),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        cfg = config()
+        if end < start or (end - start).days > 370:
+            raise HTTPException(400, "Date range must be ordered and no longer than 371 days")
+        if bulk_action not in {"schedule", "no_bells", "default"}:
+            raise HTTPException(400, "Choose a valid bulk calendar action")
+        if bulk_action == "schedule" and schedule_name not in cfg.schedule_map:
+            raise HTTPException(400, "Choose a valid schedule")
+        reason = no_bell_reason.strip()
+        if bulk_action == "no_bells" and not reason:
+            raise HTTPException(400, "Enter a reason for the no-bell range")
+
+        def mutate(document: Any, _current: BellConfig) -> None:
+            calendar = document["calendar"]
+            overrides = calendar.setdefault("overrides", {})
+            no_bells = calendar.setdefault("no_bell_dates", {})
+            for offset in range((end - start).days + 1):
+                day = start + timedelta(days=offset)
+                for key in (day, day.isoformat()):
+                    overrides.pop(key, None)
+                    no_bells.pop(key, None)
+                if bulk_action == "schedule":
+                    overrides[day] = schedule_name
+                elif bulk_action == "no_bells":
+                    no_bells[day] = reason
+
+        write_config_document("calendar.yaml", "calendar", config_hash, mutate)
+        record_audit("calendar_bulk_change", f"{start} through {end}", bulk_action)
+        query = urlencode({"selected": start.isoformat(), "month": start.strftime("%Y-%m")})
+        return RedirectResponse(f"/calendar?{query}", status_code=303)
+
+    @app.get("/calendar/export.csv")
+    def calendar_export(request: Request, year: int | None = None) -> Response:
+        require_auth(request)
+        cfg = config()
+        selected_year = year or datetime.now(ZoneInfo(cfg.settings.timezone)).year
+        if not 2000 <= selected_year <= 2100:
+            raise HTTPException(400, "Year must be between 2000 and 2100")
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(
+            output,
+            fieldnames=["date", "weekday", "schedule", "reason", "event_count", "events"],
+        )
+        writer.writeheader()
+        for month_number in range(1, 13):
+            for day_number in range(
+                1, calendar_module.monthrange(selected_year, month_number)[1] + 1
+            ):
+                day = date(selected_year, month_number, day_number)
+                plan = resolve_day(day, cfg)
+                writer.writerow(
+                    {
+                        "date": day.isoformat(),
+                        "weekday": day.strftime("%A"),
+                        "schedule": plan.schedule_name or "",
+                        "reason": plan.reason or "",
+                        "event_count": len(plan.events),
+                        "events": "; ".join(
+                            f"{item.scheduled_at:%H:%M} {item.event.label} [{item.event.zone}]"
+                            for item in plan.events
+                        ),
+                    }
+                )
+        return Response(
+            output.getvalue(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=school-bell-calendar-{selected_year}.csv"
+            },
+        )
 
     def schedule_references(cfg: BellConfig, schedule_name: str) -> list[str]:
         references = [
@@ -542,9 +971,7 @@ def create_app(
             if event.zone == zone_name
         ]
         references.extend(
-            f"Standing item: {item.label}"
-            for item in cfg.standing_items
-            if item.zone == zone_name
+            f"Standing item: {item.label}" for item in cfg.standing_items if item.zone == zone_name
         )
         return references
 
@@ -583,9 +1010,7 @@ def create_app(
             source = cfg.schedule_map.get(copy)
             if source is None:
                 raise HTTPException(404, "The schedule to duplicate does not exist")
-            schedule = source.model_copy(
-                deep=True, update={"name": f"{source.name} Copy"}
-            )
+            schedule = source.model_copy(deep=True, update={"name": f"{source.name} Copy"})
         elif new:
             schedule = BellSchedule(name="", events=[])
         elif selected is not None:
@@ -773,7 +1198,9 @@ def create_app(
             if references:
                 raise HTTPException(
                     409,
-                    "This schedule is still assigned to: " + ", ".join(references) + ". Update the Calendar first.",
+                    "This schedule is still assigned to: "
+                    + ", ".join(references)
+                    + ". Update the Calendar first.",
                 )
             schedules = document.get("schedules", [])
             document["schedules"] = [
@@ -815,6 +1242,101 @@ def create_app(
             available_channels=sorted({23, 24, 25} - {zone.channel for zone in cfg.zones}),
             message=message,
         )
+
+    @app.post("/setup/branding/save")
+    async def branding_save(
+        request: Request,
+        school_name: str = Form(),
+        console_subtitle: str = Form(),
+        logo_file: UploadFile | None = File(default=None),  # noqa: B008
+        remove_logo: bool = Form(default=False),
+        config_hash: str = Form(default=""),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        current = config()
+        has_upload = bool(logo_file and logo_file.filename)
+        if remove_logo and has_upload:
+            raise HTTPException(400, "Choose either a new logo or remove the current logo")
+        try:
+            validated = Settings.model_validate(
+                {
+                    **current.settings.model_dump(),
+                    "school_name": school_name,
+                    "console_subtitle": console_subtitle,
+                    "logo_filename": (
+                        "logo.png"
+                        if has_upload
+                        else None
+                        if remove_logo
+                        else current.settings.logo_filename
+                    ),
+                }
+            )
+        except ValidationError as exc:
+            raise HTTPException(400, exc.errors(include_url=False)[0]["msg"]) from exc
+
+        staged: Path | None = None
+        target = current.state_path / "branding" / "logo.png"
+        previous: Path | None = None
+        if has_upload:
+            assert logo_file is not None
+            staging = current.state_path / "branding-staging"
+            staging.mkdir(parents=True, exist_ok=True)
+            source: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "wb", dir=staging, prefix="logo-upload-", suffix=".bin", delete=False
+                ) as handle:
+                    source = Path(handle.name)
+                    total = 0
+                    while chunk := await logo_file.read(256 * 1024):
+                        total += len(chunk)
+                        if total > 2 * 1024 * 1024:
+                            raise HTTPException(413, "Logo upload exceeds the 2 MiB limit")
+                        handle.write(chunk)
+                if not total:
+                    raise HTTPException(400, "Uploaded logo is empty")
+                staged = staging / f"normalized-{secrets.token_hex(8)}.png"
+                normalize_logo(source, staged)
+            except BrandingError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            finally:
+                if source:
+                    source.unlink(missing_ok=True)
+
+        try:
+            if staged:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    previous = target.parent / f"previous-{secrets.token_hex(8)}.png"
+                    shutil.copy2(target, previous)
+                staged.replace(target)
+                staged = None
+
+            def mutate(document: Any, _cfg: BellConfig) -> None:
+                settings = document.setdefault("settings", {})
+                settings["school_name"] = validated.school_name
+                settings["console_subtitle"] = validated.console_subtitle
+                settings["logo_filename"] = validated.logo_filename
+
+            write_config_document("settings.yaml", "settings", config_hash, mutate)
+        except Exception:
+            if previous:
+                shutil.copy2(previous, target)
+            elif has_upload:
+                target.unlink(missing_ok=True)
+            raise
+        finally:
+            if staged:
+                staged.unlink(missing_ok=True)
+            if previous:
+                previous.unlink(missing_ok=True)
+        if remove_logo:
+            target.unlink(missing_ok=True)
+        LOGGER.info("ui_action", extra={"action": "branding_change", "result": "success"})
+        return RedirectResponse("/setup?message=School+branding+saved.#branding", status_code=303)
 
     def calibration_workspace(cfg: BellConfig) -> Path:
         return cfg.state_path / "poly-calibration"
@@ -1038,9 +1560,7 @@ def create_app(
             except (AudioProcessingError, CalibrationError) as exc:
                 raise HTTPException(400, str(exc)) from exc
             captured_at = datetime.now(UTC)
-            evidence_id = (
-                f"{captured_at:%Y%m%dT%H%M%S%fZ}-{derived.evidence[0].header_sha256[:12]}"
-            )
+            evidence_id = f"{captured_at:%Y%m%dT%H%M%S%fZ}-{derived.evidence[0].header_sha256[:12]}"
             calibration = PolyCalibration(
                 channel_bias=derived.spec.channel_bias,
                 control_header_bytes=derived.spec.control_header_bytes,
@@ -1123,8 +1643,10 @@ def create_app(
         verify_csrf(request, csrf)
         cfg = config()
         label = event_label.strip()
-        if not label or len(label) > 100 or any(
-            ord(character) < 32 or ord(character) == 127 for character in label
+        if (
+            not label
+            or len(label) > 100
+            or any(ord(character) < 32 or ord(character) == 127 for character in label)
         ):
             raise HTTPException(400, "Standing-item label must be 1 to 100 safe characters")
         if event_sound not in safe_sound_names(cfg) or (
@@ -1159,7 +1681,9 @@ def create_app(
             items = document.setdefault("standing_items", [])
             if standing_index == -1:
                 items.append(document_item)
-            elif not 0 <= standing_index < len(current.standing_items) or standing_index >= len(items):
+            elif not 0 <= standing_index < len(current.standing_items) or standing_index >= len(
+                items
+            ):
                 raise HTTPException(409, "That standing item changed or no longer exists")
             else:
                 items[standing_index] = document_item
@@ -1168,7 +1692,11 @@ def create_app(
         action = "created" if standing_index == -1 else "updated"
         LOGGER.info(
             "ui_action",
-            extra={"action": f"standing_item_{action}", "target": "standing_item", "result": "success"},
+            extra={
+                "action": f"standing_item_{action}",
+                "target": "standing_item",
+                "result": "success",
+            },
         )
         return RedirectResponse(
             f"/setup?{urlencode({'message': f'Standing item {action}.'})}#standing-items",
@@ -1187,12 +1715,16 @@ def create_app(
 
         def mutate(document: Any, current: BellConfig) -> None:
             items = document.get("standing_items", [])
-            if not 0 <= standing_index < len(current.standing_items) or standing_index >= len(items):
+            if not 0 <= standing_index < len(current.standing_items) or standing_index >= len(
+                items
+            ):
                 raise HTTPException(409, "That standing item changed or no longer exists")
             del items[standing_index]
 
         write_config_document("schedules.yaml", "schedules", config_hash, mutate)
-        return RedirectResponse("/setup?message=Standing+item+deleted.#standing-items", status_code=303)
+        return RedirectResponse(
+            "/setup?message=Standing+item+deleted.#standing-items", status_code=303
+        )
 
     @app.post("/setup/zones/save")
     def zone_save(
@@ -1209,8 +1741,10 @@ def create_app(
         verify_csrf(request, csrf)
         zone_name = zone_name.strip()
         description = description.strip()
-        if not zone_name or len(zone_name) > 100 or any(
-            ord(character) < 32 or ord(character) == 127 for character in zone_name
+        if (
+            not zone_name
+            or len(zone_name) > 100
+            or any(ord(character) < 32 or ord(character) == 127 for character in zone_name)
         ):
             raise HTTPException(400, "Zone name must be 1 to 100 safe characters")
         if original_name and zone_name != original_name:
@@ -1245,13 +1779,17 @@ def create_app(
                     item.name != original_name and item.channel == zone.channel
                     for item in current.zones
                 ):
-                    raise HTTPException(409, "That Poly channel is already assigned to another zone")
+                    raise HTTPException(
+                        409, "That Poly channel is already assigned to another zone"
+                    )
                 zones[names.index(original_name)] = zone_document
             else:
                 if zone.name in current.zone_map:
                     raise HTTPException(409, "A zone with that name already exists")
                 if any(item.channel == zone.channel for item in current.zones):
-                    raise HTTPException(409, "That Poly channel is already assigned to another zone")
+                    raise HTTPException(
+                        409, "That Poly channel is already assigned to another zone"
+                    )
                 zones.append(zone_document)
 
         write_config_document("zones.yaml", "zones", config_hash, mutate)
@@ -1312,8 +1850,10 @@ def create_app(
         require_auth(request)
         verify_csrf(request, csrf)
         destination_name = destination_name.strip()
-        if not destination_name or len(destination_name) > 100 or any(
-            ord(character) < 32 or ord(character) == 127 for character in destination_name
+        if (
+            not destination_name
+            or len(destination_name) > 100
+            or any(ord(character) < 32 or ord(character) == 127 for character in destination_name)
         ):
             raise HTTPException(400, "Destination name must be 1 to 100 safe characters")
         if original_name and destination_name != original_name:
@@ -1336,9 +1876,7 @@ def create_app(
             "tls_server_name": (tls_server_name or None) if protocol == "sip" else None,
             "tls_ca_file": (tls_ca_file or None) if protocol == "sip" else None,
             "webhook_url": (webhook_url or None) if protocol == "http" else None,
-            "webhook_secret_env": (
-                (webhook_secret_env or None) if protocol == "http" else None
-            ),
+            "webhook_secret_env": ((webhook_secret_env or None) if protocol == "http" else None),
             "allow_insecure_http": allow_insecure_http if protocol == "http" else False,
             "healthcheck_url": (healthcheck_url or None) if protocol == "http" else None,
             "timeout_seconds": timeout_seconds,
@@ -1384,7 +1922,9 @@ def create_app(
                 raise HTTPException(404, "That destination no longer exists")
             references = destination_references(current, destination_name)
             if references:
-                raise HTTPException(409, "Destination is still used by zones: " + ", ".join(references))
+                raise HTTPException(
+                    409, "Destination is still used by zones: " + ", ".join(references)
+                )
             document["destinations"] = [
                 item
                 for item in document.get("destinations", [])
@@ -1419,7 +1959,9 @@ def create_app(
             "sunday": sunday or None,
         }
         cfg = config()
-        invalid = sorted({name for name in defaults.values() if name and name not in cfg.schedule_map})
+        invalid = sorted(
+            {name for name in defaults.values() if name and name not in cfg.schedule_map}
+        )
         if invalid:
             raise HTTPException(400, "Unknown schedules: " + ", ".join(invalid))
 
@@ -1483,12 +2025,16 @@ def create_app(
 
         def mutate(document: Any, current: BellConfig) -> None:
             ranges = document["calendar"].setdefault("date_ranges", [])
-            if not 0 <= range_index < len(current.calendar.date_ranges) or range_index >= len(ranges):
+            if not 0 <= range_index < len(current.calendar.date_ranges) or range_index >= len(
+                ranges
+            ):
                 raise HTTPException(409, "That date range changed or no longer exists")
             del ranges[range_index]
 
         write_config_document("calendar.yaml", "calendar", config_hash, mutate)
-        return RedirectResponse("/setup?message=Date+range+deleted.#calendar-rules", status_code=303)
+        return RedirectResponse(
+            "/setup?message=Date+range+deleted.#calendar-rules", status_code=303
+        )
 
     @app.post("/setup/settings/save")
     def settings_save(
@@ -1496,6 +2042,9 @@ def create_app(
         interface_ip: str = Form(),
         wire_format: str = Form(),
         poly_caller_id: str = Form(),
+        alert_webhook_url: str = Form(default=""),
+        alert_webhook_secret_env: str = Form(default=""),
+        alert_allow_insecure_http: bool = Form(default=False),
         rtc_required: bool = Form(default=False),
         endpoint_check_interval_seconds: int = Form(),
         api_rate_limit_per_minute: int = Form(),
@@ -1522,6 +2071,12 @@ def create_app(
                     "interface_ip": interface_ip,
                     "wire_format": wire_format,
                     "poly_caller_id": poly_caller_id,
+                    "school_name": current.settings.school_name,
+                    "console_subtitle": current.settings.console_subtitle,
+                    "logo_filename": current.settings.logo_filename,
+                    "alert_webhook_url": alert_webhook_url.strip() or None,
+                    "alert_webhook_secret_env": alert_webhook_secret_env.strip() or None,
+                    "alert_allow_insecure_http": alert_allow_insecure_http,
                     "rtc_required": rtc_required,
                     "endpoint_check_interval_seconds": endpoint_check_interval_seconds,
                     "api_rate_limit_per_minute": api_rate_limit_per_minute,
@@ -1543,6 +2098,8 @@ def create_app(
                     "emergency_priority_threshold": emergency_priority_threshold,
                     "kill_switch_enabled": kill_switch_enabled,
                     "kill_switch_until": kill_switch_until or None,
+                    "pause_until": current.safety.pause_until,
+                    "pause_reason": current.safety.pause_reason,
                 }
             )
         except ValidationError as exc:
@@ -1562,7 +2119,28 @@ def create_app(
             safety_doc.update(safety_payload)
 
         write_config_document("settings.yaml", "settings", config_hash, mutate)
-        return RedirectResponse("/setup?message=Settings+saved+and+activated.#settings", status_code=303)
+        return RedirectResponse(
+            "/setup?message=Settings+saved+and+activated.#settings", status_code=303
+        )
+
+    @app.post("/setup/alerts/test")
+    def alert_test(request: Request, csrf: str = Form()) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        outcome = AlertDispatcher(config().settings).send(
+            "operator_test",
+            "School Bell test alert",
+            severity="info",
+            details={"source": "front-office setup"},
+            force=True,
+        )
+        record_audit("alert_test", "operational webhook", outcome.detail)
+        message = (
+            "Test alert sent." if outcome.success else f"Test alert did not send: {outcome.detail}"
+        )
+        return RedirectResponse(
+            f"/setup?{urlencode({'message': message})}#settings", status_code=303
+        )
 
     def valid_sound_target(name: str) -> str:
         normalized = name.strip()
@@ -1588,7 +2166,9 @@ def create_app(
         verify_csrf(request, csrf)
         target_name = valid_sound_target(desired_name)
         if existing_name and target_name != existing_name:
-            raise HTTPException(400, "Replacement keeps the existing name; create a new sound to rename")
+            raise HTTPException(
+                400, "Replacement keeps the existing name; create a new sound to rename"
+            )
         cfg = config()
         staging_dir = cfg.state_path / "sound-staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -1738,7 +2318,12 @@ def create_app(
         )
 
     @app.get("/manual", response_class=HTMLResponse)
-    def manual_page(request: Request, message: str | None = None) -> HTMLResponse:
+    def manual_page(
+        request: Request,
+        message: str | None = None,
+        sound: str | None = None,
+        zone: str | None = None,
+    ) -> HTMLResponse:
         require_auth(request)
         cfg = config()
         sounds = sorted(path.name for path in cfg.sounds_path.iterdir() if path.is_file())
@@ -1757,6 +2342,8 @@ def create_app(
             transmission_completed=message == "transmission completed",
             within_hours=within_hours,
             school_time=now,
+            selected_sound=sound if sound in sounds else None,
+            selected_zone=zone if zone in cfg.zone_map else None,
         )
 
     @app.post("/manual/prepare", response_class=HTMLResponse)
@@ -1770,7 +2357,9 @@ def create_app(
         require_auth(request)
         verify_csrf(request, csrf)
         cfg = config()
-        if zone not in cfg.zone_map or sound not in {path.name for path in cfg.sounds_path.iterdir()}:
+        if zone not in cfg.zone_map or sound not in {
+            path.name for path in cfg.sounds_path.iterdir()
+        }:
             raise HTTPException(400, "Choose a valid sound and zone")
         payload = {"sound": sound, "zone": zone, "override_hours": override_hours}
         token = signer.dumps(payload)
@@ -1794,7 +2383,9 @@ def create_app(
         try:
             payload = signer.loads(confirm_token, max_age=120)
         except (BadSignature, SignatureExpired) as exc:
-            raise HTTPException(400, "Confirmation expired or is invalid. Please start again.") from exc
+            raise HTTPException(
+                400, "Confirmation expired or is invalid. Please start again."
+            ) from exc
         cfg = config()
         now = datetime.now(ZoneInfo(cfg.settings.timezone))
         sound = cfg.sounds_path / payload["sound"]
@@ -1810,7 +2401,12 @@ def create_app(
         if not decision.allowed:
             LOGGER.warning(
                 "ui_action",
-                extra={"action": "manual_fire", "target": payload, "result": "blocked", "reason": decision.reason},
+                extra={
+                    "action": "manual_fire",
+                    "target": payload,
+                    "result": "blocked",
+                    "reason": decision.reason,
+                },
             )
             return RedirectResponse(f"/manual?message={decision.reason}", status_code=303)
         if scheduler is None:
@@ -1819,7 +2415,12 @@ def create_app(
             event_time = now.timetz().replace(second=0, microsecond=0, tzinfo=None)
             from bell.config import BellEvent
 
-            event = BellEvent(time=event_time, sound=payload["sound"], zone=payload["zone"], label="Manual office trigger")
+            event = BellEvent(
+                time=event_time,
+                sound=payload["sound"],
+                zone=payload["zone"],
+                label="Manual office trigger",
+            )
             planned = PlannedEvent(event, "Manual", now)
             decision = scheduler.fire(
                 planned,
@@ -1834,13 +2435,242 @@ def create_app(
         )
         return RedirectResponse(f"/manual?message={result_reason}", status_code=303)
 
+    @app.get("/commissioning", response_class=HTMLResponse)
+    def commissioning_page(request: Request, message: str | None = None) -> HTMLResponse:
+        require_auth(request)
+        cfg = config()
+        health = health_provider() if health_provider else None
+        confirmations = scheduler.state.zone_confirmations() if scheduler else {}
+        default_sound = (
+            "class-bell.wav"
+            if (cfg.sounds_path / "class-bell.wav").is_file()
+            else safe_sound_names(cfg)[0]
+        )
+        return render(
+            request,
+            "commissioning.html",
+            config=cfg,
+            health=health,
+            confirmations=confirmations,
+            default_sound=default_sound,
+            message=message,
+        )
+
+    @app.post("/commissioning/confirm")
+    def commissioning_confirm(
+        request: Request,
+        zone: str = Form(),
+        observer: str = Form(),
+        note: str = Form(default=""),
+        heard: bool = Form(default=False),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        cfg = config()
+        if zone not in cfg.zone_map:
+            raise HTTPException(400, "Choose a configured zone")
+        normalized_observer = observer.strip()
+        normalized_note = note.strip()
+        if (
+            not heard
+            or not normalized_observer
+            or len(normalized_observer) > 100
+            or len(normalized_note) > 200
+        ):
+            raise HTTPException(400, "Confirm the audible result and enter a valid observer name")
+        if scheduler is None:
+            raise HTTPException(503, "Commissioning history is unavailable")
+        now = datetime.now(ZoneInfo(cfg.settings.timezone))
+        scheduler.state.confirm_zone(zone, normalized_observer, normalized_note, now)
+        scheduler.state.record_audit(
+            "zone_acceptance", zone, f"heard by {normalized_observer}: {normalized_note}", now
+        )
+        return RedirectResponse(
+            f"/commissioning?{urlencode({'message': f'{zone.title()} acceptance recorded.'})}",
+            status_code=303,
+        )
+
     @app.get("/status", response_class=HTMLResponse)
     def status_page(request: Request) -> HTMLResponse:
         require_auth(request)
         cfg = config()
         recent = scheduler.state.recent() if scheduler else []
         health = health_provider() if health_provider else None
-        return render(request, "status.html", config=cfg, recent=recent, health=health)
+        disk = shutil.disk_usage(cfg.config_dir.parent)
+        backup_dir = cfg.state_path / "operator-backups"
+        latest_backup = max(backup_dir.glob("school-bell-backup-*.tar.gz"), default=None)
+        return render(
+            request,
+            "status.html",
+            config=cfg,
+            recent=recent,
+            health=health,
+            disk=disk,
+            latest_backup=latest_backup,
+            version=__version__,
+        )
+
+    @app.get("/history", response_class=HTMLResponse)
+    def history_page(
+        request: Request,
+        result: str | None = None,
+        zone: str | None = None,
+        source: str | None = None,
+    ) -> HTMLResponse:
+        require_auth(request)
+        cfg = config()
+        rows = (
+            scheduler.state.recent(250, result=result, zone=zone, source=source)
+            if scheduler
+            else []
+        )
+        audits = scheduler.state.recent_audit(100) if scheduler else []
+        return render(
+            request,
+            "history.html",
+            config=cfg,
+            rows=rows,
+            audits=audits,
+            filters={"result": result or "", "zone": zone or "", "source": source or ""},
+        )
+
+    @app.get("/history/export.csv")
+    def history_export(
+        request: Request,
+        result: str | None = None,
+        zone: str | None = None,
+        source: str | None = None,
+    ) -> Response:
+        require_auth(request)
+        rows = (
+            scheduler.state.recent(1000, result=result, zone=zone, source=source)
+            if scheduler
+            else []
+        )
+        output = io.StringIO(newline="")
+        fields = [
+            "attempted_at",
+            "result",
+            "source",
+            "label",
+            "zone",
+            "sound",
+            "scheduled_at",
+            "detail",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+        return Response(
+            output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=school-bell-history.csv"},
+        )
+
+    @app.get("/recovery", response_class=HTMLResponse)
+    def recovery_page(request: Request, message: str | None = None) -> HTMLResponse:
+        require_auth(request)
+        cfg = config()
+        backup_dir = cfg.state_path / "operator-backups"
+        backups = (
+            sorted(backup_dir.glob("school-bell-backup-*.tar.gz"), reverse=True)[:10]
+            if backup_dir.is_dir()
+            else []
+        )
+        return render(
+            request,
+            "recovery.html",
+            config=cfg,
+            config_hash=cfg.hash,
+            backups=backups,
+            message=message,
+        )
+
+    @app.post("/recovery/export")
+    def recovery_export(request: Request, csrf: str = Form()) -> FileResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        cfg = config()
+        try:
+            archive = create_portable_backup(cfg, cfg.state_path / "operator-backups")
+        except (OSError, RecoveryError) as exc:
+            raise HTTPException(500, f"Backup could not be created: {exc}") from exc
+        LOGGER.info("ui_action", extra={"action": "backup_export", "result": "success"})
+        return FileResponse(archive, media_type="application/gzip", filename=archive.name)
+
+    @app.post("/recovery/restore")
+    async def recovery_restore(
+        request: Request,
+        backup_file: UploadFile = File(),  # noqa: B008
+        confirm_restore: bool = Form(default=False),
+        config_hash: str = Form(default=""),
+        csrf: str = Form(),
+    ) -> RedirectResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        if not confirm_restore:
+            raise HTTPException(400, "Confirm that the current configuration will be replaced")
+        cfg = config()
+        if not config_hash or not secrets.compare_digest(config_hash, cfg.hash):
+            raise HTTPException(409, "Configuration changed. Reload and try again.")
+        staging = cfg.state_path / "restore-staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        source: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb", dir=staging, prefix="restore-", suffix=".tar.gz", delete=False
+            ) as handle:
+                source = Path(handle.name)
+                total = 0
+                while chunk := await backup_file.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > 50 * 1024 * 1024:
+                        raise HTTPException(413, "Backup upload exceeds the 50 MiB limit")
+                    handle.write(chunk)
+            if not total:
+                raise HTTPException(400, "Uploaded backup is empty")
+            with config_lock:
+                refreshed = config()
+                if not secrets.compare_digest(config_hash, refreshed.hash):
+                    raise HTTPException(409, "Configuration changed. Reload and try again.")
+                restore_portable_backup(
+                    source,
+                    directory.parent,
+                    refreshed.state_path / "operator-backups",
+                    reload_callback=reload_callback,
+                )
+        except RecoveryError as exc:
+            LOGGER.warning("backup_restore_rejected", extra={"detail": str(exc)})
+            raise HTTPException(400, str(exc)) from exc
+        finally:
+            if source:
+                source.unlink(missing_ok=True)
+        LOGGER.warning("ui_action", extra={"action": "backup_restore", "result": "success"})
+        record_audit("backup_restore", "configuration", "portable backup restored")
+        return RedirectResponse(
+            f"/recovery?{urlencode({'message': 'Backup restored and activated.'})}",
+            status_code=303,
+        )
+
+    @app.post("/recovery/support")
+    def recovery_support(request: Request, csrf: str = Form()) -> FileResponse:
+        require_auth(request)
+        verify_csrf(request, csrf)
+        cfg = config()
+        health = health_provider() if health_provider else None
+        recent = scheduler.state.recent(50) if scheduler else []
+        try:
+            archive = create_support_bundle(
+                cfg,
+                cfg.state_path / "support-bundles",
+                health=health,
+                recent=recent,
+            )
+        except OSError as exc:
+            raise HTTPException(500, f"Support bundle could not be created: {exc}") from exc
+        LOGGER.info("ui_action", extra={"action": "support_bundle", "result": "success"})
+        return FileResponse(archive, media_type="application/zip", filename=archive.name)
 
     @app.get("/updates", response_class=HTMLResponse)
     def updates_page(request: Request, queued: bool = False) -> HTMLResponse:
@@ -1971,11 +2801,15 @@ def create_app(
     def api_health(request: Request) -> dict[str, Any]:
         api_scope(request)
         cfg = config()
-        return health_provider() if health_provider else {
-            "status": "ok",
-            "config_valid": True,
-            "config_hash": cfg.hash,
-        }
+        return (
+            health_provider()
+            if health_provider
+            else {
+                "status": "ok",
+                "config_valid": True,
+                "config_hash": cfg.hash,
+            }
+        )
 
     @app.get("/api/v1/today")
     def api_today(request: Request) -> dict[str, Any]:
@@ -2004,9 +2838,13 @@ def create_app(
         if scheduler is None:
             raise HTTPException(status_code=503, detail="Scheduler is not attached")
         idempotency_key = request.headers.get("Idempotency-Key", "")
-        if not idempotency_key or len(idempotency_key) > 128 or any(
-            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
-            for character in idempotency_key
+        if (
+            not idempotency_key
+            or len(idempotency_key) > 128
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+                for character in idempotency_key
+            )
         ):
             raise HTTPException(
                 status_code=400,
@@ -2022,20 +2860,24 @@ def create_app(
                     status_code=409,
                     detail="Idempotency-Key was already used with a different request payload",
                 )
-            scheduler.state.expire_stale_api_request(idempotency_key, datetime.now(ZoneInfo(config().settings.timezone)))
+            scheduler.state.expire_stale_api_request(
+                idempotency_key, datetime.now(ZoneInfo(config().settings.timezone))
+            )
             existing = scheduler.state.api_result(idempotency_key) or existing
             status_code = 409 if existing["status"] == "indeterminate" else 200
-            return JSONResponse(
-                {"idempotent_replay": True, **existing}, status_code=status_code
-            )
+            return JSONResponse({"idempotent_replay": True, **existing}, status_code=status_code)
         cfg = config()
         if trigger.zone not in cfg.zone_map:
             raise HTTPException(status_code=400, detail="Unknown zone")
         if not (cfg.sounds_path / trigger.sound).is_file():
             raise HTTPException(status_code=400, detail="Unknown sound")
         if trigger.repeat_count > cfg.safety.max_repeats:
-            raise HTTPException(status_code=400, detail="repeat_count exceeds the configured safety limit")
-        emergency = trigger.priority >= cfg.safety.emergency_priority_threshold or trigger.override_hours
+            raise HTTPException(
+                status_code=400, detail="repeat_count exceeds the configured safety limit"
+            )
+        emergency = (
+            trigger.priority >= cfg.safety.emergency_priority_threshold or trigger.override_hours
+        )
         if emergency and scope != "emergency":
             raise HTTPException(
                 status_code=403,

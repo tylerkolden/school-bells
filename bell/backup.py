@@ -13,18 +13,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
-def _copy_tree(source: Path, target: Path) -> None:
+def _copy_tree(source: Path, target: Path, *, exclude_names: frozenset[str] = frozenset()) -> None:
     target.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
+        if item.name in exclude_names:
+            continue
         if item.is_symlink():
             raise RuntimeError(f"refusing to back up symbolic link: {item}")
         destination = target / item.name
         if item.is_dir():
-            _copy_tree(item, destination)
+            _copy_tree(item, destination, exclude_names=exclude_names)
         elif item.is_file() and item.suffix in {".sqlite", ".sqlite3", ".db"}:
-            with closing(sqlite3.connect(item)) as source_db, closing(
-                sqlite3.connect(destination)
-            ) as target_db:
+            with (
+                closing(sqlite3.connect(item)) as source_db,
+                closing(sqlite3.connect(destination)) as target_db,
+            ):
                 source_db.backup(target_db)
         elif item.is_file():
             shutil.copy2(item, destination)
@@ -47,12 +50,29 @@ def create_backup(
     with tempfile.TemporaryDirectory(prefix="bell-backup-") as temporary:
         stage = Path(temporary)
         _copy_tree(config_dir, stage / "config")
+        sounds_dir = app_dir / "sounds"
+        if sounds_dir.is_dir():
+            _copy_tree(sounds_dir, stage / "sounds")
         state_dir = app_dir / "state"
         if state_dir.is_dir():
-            _copy_tree(state_dir, stage / "state")
+            _copy_tree(
+                state_dir,
+                stage / "state",
+                exclude_names=frozenset(
+                    {
+                        "branding-staging",
+                        "operator-backups",
+                        "restore-staging",
+                        "sound-staging",
+                        "support-bundles",
+                    }
+                ),
+            )
         archive = backup_dir / f"deployment-{current:%Y%m%dT%H%M%S%fZ}.tar.gz"
         with tarfile.open(archive, "w:gz") as output:
             output.add(stage / "config", arcname="config")
+            if (stage / "sounds").exists():
+                output.add(stage / "sounds", arcname="sounds")
             if (stage / "state").exists():
                 output.add(stage / "state", arcname="state")
     archive.chmod(0o600)
