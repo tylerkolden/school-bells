@@ -9,6 +9,10 @@
 5. Open **Status** and confirm configuration is valid. Do not turn on the kill switch for an
    ordinary snow day; the dated calendar entry is auditable and expires automatically.
 
+For a multi-day closure, use **Calendar → Apply a date range**. Review the inclusive start/end
+dates and reason before applying the atomic change. Export the school year CSV when a human-readable
+record is needed.
+
 ## Fire drill / emergency all-call
 
 Coordinate with school leadership before the drill. In **Ring Now**, choose the approved alert
@@ -60,6 +64,11 @@ do not manually offset YAML times for DST.
 
 ## Routine changes
 
+The **Today** page is the primary daily view. Confirm the school-local clock, next bell countdown,
+readiness state, and next five events at the start of the day. Use a documented temporary pause for
+a drill or assembly; it expires automatically. The active-page stop control cooperatively halts the
+current transmission and does not bypass the scheduler's safety checks.
+
 After every configuration change, reboot, phone reprovisioning, or software upgrade, run:
 
 ```bash
@@ -86,6 +95,15 @@ Setup changes for zones, destinations, standing items, calendar rules, and safet
 same validation/backup/rollback path. Sound replacements and deletions retain recovery copies under
 `state/sound-backups/`. The UI blocks deletion of a sound, zone, destination, or schedule while
 another configuration object references it; resolve the listed dependencies first.
+
+Before major calendar or routing work, download a portable archive from **Recovery**. It contains
+configuration, sounds, and branding, but deliberately excludes credentials, authentication state,
+logs, and fire history. Restore only during a quiet window and keep the browser open until live
+reload succeeds. Download a redacted support bundle when troubleshooting; inspect it before sharing.
+
+After receiver provisioning, network work, or paging firmware changes, use **Commissioning** to run
+one controlled test per zone and record who physically heard it. Packet transmission and endpoint
+health are diagnostics, not proof of audible delivery.
 
 Automation keys are credentials. Rotate normal and emergency keys independently, keep the emergency
 key only in approved panic-button/integration systems, and never put either key in a URL or browser

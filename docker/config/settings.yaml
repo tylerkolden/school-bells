@@ -3,6 +3,13 @@ settings:
   # Bind to the container interface. This profile has no multicast destinations.
   interface_ip: 0.0.0.0
   wire_format: plain_rtp
+  poly_caller_id: School Bells
+  school_name: School Bell
+  console_subtitle: Operations console
+  logo_filename:
+  alert_webhook_url:
+  alert_webhook_secret_env:
+  alert_allow_insecure_http: false
   rtc_required: false
   endpoint_check_interval_seconds: 15
   api_rate_limit_per_minute: 30
@@ -22,3 +29,5 @@ safety:
   emergency_priority_threshold: 90
   kill_switch_enabled: false
   kill_switch_until:
+  pause_until:
+  pause_reason:

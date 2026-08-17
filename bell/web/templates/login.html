@@ -1,7 +1,7 @@
-{% extends "base.html" %}{% block title %}Sign in — School Bell{% endblock %}
+{% extends "base.html" %}{% block title %}Sign in · {{ brand.school_name }}{% endblock %}
 {% block content %}
 <section class="auth-shell">
-  <div class="auth-intro"><span class="eyebrow">School operations</span><h1>Every bell, on time.</h1><p>Secure access for authorized office staff.</p></div>
-  <form method="post" class="card auth-card"><input type="hidden" name="csrf" value="{{ csrf_token }}"><h2>Sign in</h2>{% if failed %}<div class="notice danger" role="alert"><strong>Sign-in failed.</strong> Check the password and try again.</div>{% endif %}<label for="password">Password</label><input id="password" autofocus name="submitted_password" type="password" autocomplete="current-password" required><button class="primary full-width">Continue</button></form>
+  <div class="auth-intro">{% if brand.has_logo %}<img class="login-logo" src="/branding/logo.png" alt="{{ brand.school_name }} logo">{% endif %}<span class="eyebrow">{{ brand.school_name }}</span><h1>Every bell, on time.</h1><p>{{ brand.subtitle }} · secure access for authorized office staff.</p></div>
+  <form method="post" class="card auth-card"><input type="hidden" name="csrf" value="{{ csrf_token }}"><h2>Sign in</h2>{% if failed %}<div class="notice danger" role="alert"><strong>Sign-in failed.</strong> Check the account and password.</div>{% endif %}<label for="username">Account</label><select id="username" name="username"><option value="admin">Administrator</option><option value="operator">Operator</option></select><label for="password">Password</label><input id="password" autofocus name="submitted_password" type="password" autocomplete="current-password" required><button class="primary full-width">Continue</button></form>
 </section>
 {% endblock %}

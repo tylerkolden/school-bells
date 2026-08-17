@@ -5,6 +5,13 @@ settings:
   wire_format: poly_group_page
   # Displayed as the paging source on compatible receivers (ASCII, 13 bytes maximum).
   poly_caller_id: School Bells
+  school_name: School Bell
+  console_subtitle: Operations console
+  logo_filename:
+  # Optional signed webhook for failures and readiness changes.
+  alert_webhook_url:
+  alert_webhook_secret_env:
+  alert_allow_insecure_http: false
   # Change to true after installing and verifying a DS3231 (or similar) RTC.
   rtc_required: false
   endpoint_check_interval_seconds: 60
@@ -24,3 +31,5 @@ safety:
   emergency_priority_threshold: 90
   kill_switch_enabled: false
   kill_switch_until:
+  pause_until:
+  pause_reason:

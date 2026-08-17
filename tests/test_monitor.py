@@ -35,6 +35,36 @@ def test_required_poly_destination_reports_uncalibrated(config_tree) -> None:
     assert not poly.success and poly.status == "not_calibrated"
 
 
+def test_config_reconcile_replaces_stale_protocol_and_removed_destinations() -> None:
+    registry = EndpointRegistry(failure_threshold=1, cooldown_seconds=60)
+    registry.record(DeliveryOutcome("all", "multicast", False, "failed", "bad", 1, 0.1))
+    registry.record(DeliveryOutcome("removed", "http", True, "200", "ok", 1, 0.1))
+    http = Destination(
+        name="all",
+        protocol="http",
+        port=9000,
+        webhook_url="http://receiver:9000/page",
+        allow_insecure_http=True,
+        required=False,
+    )
+
+    registry.reconcile([http])
+
+    assert registry.should_attempt(http)
+    assert registry.snapshot() == [
+        {
+            "name": "all",
+            "protocol": "http",
+            "state": "unknown",
+            "detail": "not checked",
+            "last_checked": None,
+            "last_success": None,
+            "consecutive_failures": 0,
+            "circuit_open": False,
+        }
+    ]
+
+
 def test_probe_exception_becomes_health_outcome(config_tree, monkeypatch) -> None:
     config = load_config(config_tree)
     monitor = EndpointMonitor(config, EndpointRegistry())

@@ -6,6 +6,11 @@ T31P phones and an Algo 8186 horn.
 It schedules in local wall-clock time, records every fire attempt in SQLite, refuses late or
 duplicate bells, and exposes a simple front-office UI.
 
+The **Today** operations dashboard shows the school-local clock, current schedule, next bell and
+live countdown, the next five events, last result, readiness blockers, and any active transmission.
+Authorized staff can temporarily pause scheduled bells, resume them, or cooperatively stop an
+active page without disabling safety checks.
+
 > **Deployment gate:** Poly Group Page is intentionally uncalibrated until the site's packet
 > contract is verified. The system will not transmit without live evidence. Complete
 > the guided **Setup → Run guided Poly capture** workflow on the Raspberry Pi before live use.
@@ -92,6 +97,7 @@ docker compose logs --follow
 docker compose down
 
 # Reset all local test configuration and history to repository defaults.
+# You can also double-click Reset-Local-Test.cmd and type RESET at its prompt.
 docker compose down --volumes
 docker compose up --build --detach --wait
 ```
@@ -156,6 +162,20 @@ zones, and destinations cannot be deleted until their dependents are changed. Mu
 validate an IPv4 multicast address and UDP port, and select exactly one receiver-compatible codec.
 Uploaded audio is bounded,
 validated by FFmpeg, normalized, and stored as 8 kHz mono WAV before it enters the library.
+
+Administrators can also set the school name and console subtitle, and upload a PNG, JPEG, or WebP
+logo. The server decodes and rewrites the upload as a bounded PNG before use. **Accounts** can
+replace the bootstrap password with scrypt-hashed local administrator and operator credentials;
+operators can run daily bell workflows but cannot access configuration, recovery, accounts, or
+software updates.
+
+The month calendar supports validated bulk no-bell/special-schedule ranges and CSV export.
+**History** filters and exports structured transmission outcomes and configuration audit events.
+**Commissioning** records witnessed per-zone acceptance without claiming that sending multicast
+proves a receiver played it. **Recovery** creates a credential-free portable backup of configuration,
+sounds, and branding, validates every restore before activation, automatically rolls back a failed
+reload, and produces a redacted support bundle. Optional signed alert webhooks report critical
+delivery failures and readiness transitions with duplicate suppression.
 
 Example snow day:
 

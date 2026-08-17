@@ -1,13 +1,109 @@
 "use strict";
 
-const countdown = document.querySelector("[data-target]");
-if (countdown) {
+const operations = document.querySelector("[data-operations-dashboard]");
+if (operations) {
+  let serverEpoch = new Date(operations.dataset.serverTime).getTime();
+  let receivedEpoch = Date.now();
+  let nextRefreshAfter = 0;
+
+  const serverNow = () => new Date(serverEpoch + (Date.now() - receivedEpoch));
+  const setText = (selector, value) => {
+    const element = document.querySelector(selector);
+    if (element) element.textContent = value;
+  };
+  const formatClock = (value) => value.toLocaleTimeString("en-US", {
+    hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
+  });
+  const formatCountdown = (milliseconds) => {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+    const minutes = Math.floor(seconds / 60);
+    if (minutes >= 60) {
+      const hours = Math.floor(minutes / 60);
+      return `in ${hours} hr ${minutes % 60} min`;
+    }
+    if (minutes > 0) return `in ${minutes} min ${seconds % 60} sec`;
+    return `in ${seconds} sec`;
+  };
+  const renderUpcoming = (items) => {
+    const list = document.querySelector("[data-upcoming-list]");
+    if (!list) return;
+    list.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-inline";
+      empty.textContent = "No bell is scheduled in the next year.";
+      list.append(empty);
+      return;
+    }
+    items.forEach((item, index) => {
+      const article = document.createElement("article");
+      article.className = `event${index === 0 ? " next" : ""}`;
+      const time = document.createElement("time");
+      time.dateTime = item.time;
+      time.textContent = item.display_time;
+      const detail = document.createElement("div");
+      detail.className = "event-detail";
+      const strong = document.createElement("strong");
+      strong.textContent = item.label;
+      const small = document.createElement("small");
+      small.textContent = `${item.display_day} · ${item.zone} · ${item.sound}`;
+      detail.append(strong, small);
+      article.append(time, detail);
+      if (index === 0) {
+        const pill = document.createElement("span");
+        pill.className = "pill";
+        pill.textContent = "Next";
+        article.append(pill);
+      }
+      list.append(article);
+    });
+  };
+  const applySnapshot = (data) => {
+    serverEpoch = new Date(data.server_time).getTime();
+    receivedEpoch = Date.now();
+    operations.dataset.nextTime = data.next_bell ? data.next_bell.time : "";
+    setText("[data-school-date]", data.display_date);
+    setText("[data-next-label]", data.next_bell ? data.next_bell.label : "No bell scheduled");
+    setText("[data-next-absolute]", data.next_bell ? `${data.next_bell.display_day} · ${data.next_bell.display_time}` : "—");
+    setText("[data-next-detail]", data.next_bell ? `${data.next_bell.zone} · ${data.next_bell.sound}` : "Review the calendar before the next school day.");
+    setText("[data-readiness-label]", data.ready ? "Ready" : "Needs attention");
+    setText("[data-readiness-detail]", data.ready ? "All required checks pass" : data.blocked_reasons.join(" · "));
+    const readiness = document.querySelector("[data-readiness-card]");
+    if (readiness) readiness.className = `operation-card readiness-card ${data.ready ? "ready" : "blocked"}`;
+    setText("[data-upcoming-count]", `${data.upcoming.length} shown`);
+    if (data.last_fire) {
+      setText("[data-last-label]", data.last_fire.event_label);
+      setText("[data-last-detail]", `${data.last_fire.result} · ${data.last_fire.timestamp}`);
+    }
+    renderUpcoming(data.upcoming);
+  };
+  const refresh = async () => {
+    try {
+      const response = await window.fetch("/operations/snapshot", { cache: "no-store" });
+      if (response.ok) applySnapshot(await response.json());
+    } catch (_error) {
+      setText("[data-readiness-label]", "Console disconnected");
+      setText("[data-readiness-detail]", "Trying to reconnect to the Raspberry Pi");
+    }
+  };
   const tick = () => {
-    const seconds = Math.max(0, Math.floor((new Date(countdown.dataset.target) - new Date()) / 1000));
-    countdown.textContent = `Next · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+    const now = serverNow();
+    setText("[data-school-clock]", formatClock(now));
+    const target = operations.dataset.nextTime;
+    if (!target) {
+      setText("[data-next-countdown]", "None in the next year");
+      return;
+    }
+    const remaining = new Date(target).getTime() - now.getTime();
+    setText("[data-next-countdown]", formatCountdown(remaining));
+    if (remaining <= 0 && Date.now() >= nextRefreshAfter) {
+      nextRefreshAfter = Date.now() + 5000;
+      refresh();
+    }
   };
   tick();
   window.setInterval(tick, 1000);
+  window.setInterval(refresh, 15000);
 }
 
 const scheduleName = document.querySelector("#schedule-name");

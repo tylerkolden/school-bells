@@ -66,10 +66,32 @@ def resolve_day(day: date, config: BellConfig) -> DayPlan:
     for item in config.standing_items:
         if schedule_name and item.enabled:
             event = BellEvent.model_validate(item.model_dump(exclude={"enabled"}))
-            events.append(PlannedEvent(event, "Standing", datetime.combine(day, item.time, timezone)))
+            events.append(
+                PlannedEvent(event, "Standing", datetime.combine(day, item.time, timezone))
+            )
     events.sort(key=lambda item: item.scheduled_at)
     reason = None if events else "no schedule assigned"
     return DayPlan(day, schedule_name, tuple(events), reason)
+
+
+def upcoming_events(
+    config: BellConfig,
+    now: datetime,
+    *,
+    limit: int = 5,
+    search_days: int = 370,
+) -> tuple[PlannedEvent, ...]:
+    """Return future school events across date boundaries in deterministic wall-clock order."""
+    if limit < 1:
+        return ()
+    found: list[PlannedEvent] = []
+    for offset in range(search_days + 1):
+        plan = resolve_day(now.date() + timedelta(days=offset), config)
+        found.extend(item for item in plan.events if item.scheduled_at > now)
+        if len(found) >= limit:
+            break
+    found.sort(key=lambda item: item.scheduled_at)
+    return tuple(found[:limit])
 
 
 class FireState:
@@ -86,9 +108,29 @@ class FireState:
                 )"""
             )
             connection.execute(
+                """CREATE TABLE IF NOT EXISTS zone_acceptance (
+                zone TEXT PRIMARY KEY, confirmed_at TEXT NOT NULL,
+                observer TEXT NOT NULL, note TEXT NOT NULL
+                )"""
+            )
+            fire_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(fire_attempts)").fetchall()
+            }
+            for name in ("source", "label", "zone", "sound", "scheduled_at"):
+                if name not in fire_columns:
+                    connection.execute(
+                        f"ALTER TABLE fire_attempts ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                    )
+            connection.execute(
                 """CREATE TABLE IF NOT EXISTS api_requests (
                 idempotency_key TEXT PRIMARY KEY, created_at TEXT NOT NULL,
                 status TEXT NOT NULL, detail TEXT NOT NULL, request_hash TEXT NOT NULL DEFAULT ''
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at TEXT NOT NULL,
+                action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL
                 )"""
             )
             columns = {
@@ -111,7 +153,8 @@ class FireState:
     def has_attempt(self, day: date, event_key: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT 1 FROM fire_attempts WHERE day=? AND event_key=?", (day.isoformat(), event_key)
+                "SELECT 1 FROM fire_attempts WHERE day=? AND event_key=?",
+                (day.isoformat(), event_key),
             ).fetchone()
         return row is not None
 
@@ -122,11 +165,32 @@ class FireState:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def record_once(self, day: date, event_key: str, result: str, detail: str, now: datetime) -> bool:
+    def record_once(
+        self,
+        day: date,
+        event_key: str,
+        result: str,
+        detail: str,
+        now: datetime,
+        planned: PlannedEvent | None = None,
+    ) -> bool:
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO fire_attempts VALUES (?, ?, ?, ?, ?)",
-                (day.isoformat(), event_key, now.isoformat(), result, detail),
+                """INSERT OR IGNORE INTO fire_attempts
+                (day,event_key,attempted_at,result,detail,source,label,zone,sound,scheduled_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    day.isoformat(),
+                    event_key,
+                    now.isoformat(),
+                    result,
+                    detail,
+                    planned.source if planned else "",
+                    planned.event.label if planned else "",
+                    planned.event.zone if planned else "",
+                    planned.event.sound if planned else "",
+                    planned.scheduled_at.isoformat() if planned else now.isoformat(),
+                ),
             )
         return cursor.rowcount == 1
 
@@ -137,14 +201,79 @@ class FireState:
                 (result, detail, day.isoformat(), event_key),
             )
 
-    def recent(self, limit: int = 20) -> list[dict[str, str]]:
+    def recent(
+        self,
+        limit: int = 20,
+        *,
+        result: str | None = None,
+        zone: str | None = None,
+        source: str | None = None,
+    ) -> list[dict[str, str]]:
+        clauses: list[str] = []
+        values: list[object] = []
+        for column, value in (("result", result), ("zone", zone), ("source", source)):
+            if value:
+                clauses.append(f"{column}=?")
+                values.append(value)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        values.append(min(max(limit, 1), 1000))
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT day,event_key,attempted_at,result,detail FROM fire_attempts ORDER BY attempted_at DESC LIMIT ?",
-                (limit,),
+                """SELECT day,event_key,attempted_at,result,detail,source,label,zone,sound,scheduled_at
+                FROM fire_attempts"""
+                + where
+                + " ORDER BY attempted_at DESC LIMIT ?",
+                values,
             ).fetchall()
-        keys = ("day", "event_key", "attempted_at", "result", "detail")
+        keys = (
+            "day",
+            "event_key",
+            "attempted_at",
+            "result",
+            "detail",
+            "source",
+            "label",
+            "zone",
+            "sound",
+            "scheduled_at",
+        )
         return [dict(zip(keys, row, strict=True)) for row in rows]
+
+    def record_audit(self, action: str, target: str, detail: str, now: datetime) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT INTO audit_events (occurred_at,action,target,detail) VALUES (?, ?, ?, ?)",
+                (now.isoformat(), action, target, detail),
+            )
+
+    def recent_audit(self, limit: int = 100) -> list[dict[str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT occurred_at,action,target,detail FROM audit_events
+                ORDER BY id DESC LIMIT ?""",
+                (min(max(limit, 1), 1000),),
+            ).fetchall()
+        keys = ("occurred_at", "action", "target", "detail")
+        return [dict(zip(keys, row, strict=True)) for row in rows]
+
+    def confirm_zone(self, zone: str, observer: str, note: str, now: datetime) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """INSERT INTO zone_acceptance (zone,confirmed_at,observer,note)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(zone) DO UPDATE SET confirmed_at=excluded.confirmed_at,
+                observer=excluded.observer,note=excluded.note""",
+                (zone, now.isoformat(), observer, note),
+            )
+
+    def zone_confirmations(self) -> dict[str, dict[str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT zone,confirmed_at,observer,note FROM zone_acceptance"
+            ).fetchall()
+        return {
+            row[0]: {"confirmed_at": row[1], "observer": row[2], "note": row[3]} for row in rows
+        }
 
     def api_result(self, idempotency_key: str) -> dict[str, str] | None:
         with self._connect() as connection:
@@ -161,7 +290,9 @@ class FireState:
             "request_hash": row[3],
         }
 
-    def claim_api_request(self, idempotency_key: str, now: datetime, request_hash: str = "") -> bool:
+    def claim_api_request(
+        self, idempotency_key: str, now: datetime, request_hash: str = ""
+    ) -> bool:
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO api_requests
@@ -247,7 +378,7 @@ class BellScheduler:
         current = now or datetime.now(self.timezone)
         if not manual and current - planned.scheduled_at > timedelta(seconds=60):
             reason = "event is more than 60 seconds late; skipped"
-            self.state.record_once(current.date(), planned.key, "missed", reason, current)
+            self.state.record_once(current.date(), planned.key, "missed", reason, current, planned)
             LOGGER.warning("bell_missed", extra={"event": planned.key, "reason": reason})
             return SafetyDecision(False, reason)
         if self.state.has_attempt(current.date(), planned.key):
@@ -262,11 +393,15 @@ class BellScheduler:
             override_hours=override_hours,
         )
         if not decision.allowed:
-            self.state.record_once(current.date(), planned.key, "blocked", decision.reason, current)
+            self.state.record_once(
+                current.date(), planned.key, "blocked", decision.reason, current, planned
+            )
             LOGGER.warning("bell_blocked", extra={"event": planned.key, "reason": decision.reason})
             return decision
         # Claim the event before transmission so a concurrent/restarted executor cannot double-fire.
-        if not self.state.record_once(current.date(), planned.key, "started", "transmission claimed", current):
+        if not self.state.record_once(
+            current.date(), planned.key, "started", "transmission claimed", current, planned
+        ):
             return SafetyDecision(False, "event already attempted today")
         try:
             self.transmit(planned.event, self.config, planned.source)

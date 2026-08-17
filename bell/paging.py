@@ -44,6 +44,17 @@ class PageCoordinator:
                 return None
             return {"label": self._active.label, "priority": self._active.priority}
 
+    def cancel_active(self, reason: str = "operator stop") -> bool:
+        """Request that the current sender end at its next cooperative cancellation point."""
+        with self._condition:
+            if self._active is None:
+                return False
+            # The detailed operator reason is retained in the authenticated audit
+            # record. Keep the service log event static to prevent log-forging input.
+            LOGGER.warning("active_page_cancellation_requested")
+            self._active.cancel_event.set()
+            return True
+
     @contextmanager
     def lease(self, label: str, priority: int, policy: BusyPolicy):
         lease = self._acquire(label, priority, policy)
@@ -56,7 +67,11 @@ class PageCoordinator:
     def _acquire(self, label: str, priority: int, policy: BusyPolicy) -> PageLease:
         deadline = time.monotonic() + self.queue_timeout_seconds
         with self._condition:
-            if self._active is not None and policy == "preempt" and priority > self._active.priority:
+            if (
+                self._active is not None
+                and policy == "preempt"
+                and priority > self._active.priority
+            ):
                 LOGGER.warning(
                     "page_preemption_requested",
                     extra={

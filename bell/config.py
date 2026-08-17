@@ -104,7 +104,11 @@ class Destination(BaseModel):
                 raise ValueError("SIP destinations require sip_host")
             if self.sip_transport == "tls" and not self.tls_server_name:
                 raise ValueError("TLS SIP destinations require tls_server_name")
-            if self.sip_uri and self.sip_uri.lower().startswith("sips:") and self.sip_transport != "tls":
+            if (
+                self.sip_uri
+                and self.sip_uri.lower().startswith("sips:")
+                and self.sip_transport != "tls"
+            ):
                 raise ValueError("sips: destinations require sip_transport: tls")
             if self.sip_uri:
                 userinfo = self.sip_uri.split(":", 1)[1].split("@", 1)[0]
@@ -113,8 +117,7 @@ class Destination(BaseModel):
             if bool(self.sip_username) != bool(self.sip_password_env):
                 raise ValueError("sip_username and sip_password_env must be configured together")
         if self.protocol == "http" and (
-            not self.webhook_url
-            or not self.webhook_url.lower().startswith(("http://", "https://"))
+            not self.webhook_url or not self.webhook_url.lower().startswith(("http://", "https://"))
         ):
             raise ValueError("HTTP destinations require an http:// or https:// webhook_url")
         if self.protocol == "http" and self.webhook_url:
@@ -222,6 +225,23 @@ class Safety(BaseModel):
     emergency_priority_threshold: int = Field(default=90, ge=1, le=100)
     kill_switch_enabled: bool = False
     kill_switch_until: date | None = None
+    pause_until: datetime | None = None
+    pause_reason: str | None = Field(default=None, max_length=200)
+
+    @field_validator("pause_until")
+    @classmethod
+    def pause_has_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("pause_until must include a timezone offset")
+        return value
+
+    @model_validator(mode="after")
+    def pause_is_complete(self) -> Safety:
+        if self.pause_until is not None and not (self.pause_reason or "").strip():
+            raise ValueError("pause_reason is required when pause_until is set")
+        if self.pause_until is None:
+            self.pause_reason = None
+        return self
 
 
 class PolyCalibration(BaseModel):
@@ -262,6 +282,12 @@ class Settings(BaseModel):
     max_page_seconds: float = Field(default=120.0, ge=1.0, le=1800.0)
     poly_group_page_calibration: PolyCalibration | None = None
     poly_caller_id: str = Field(default="School Bells", min_length=1, max_length=13)
+    school_name: str = Field(default="School Bell", min_length=1, max_length=100)
+    console_subtitle: str = Field(default="Operations console", min_length=1, max_length=100)
+    logo_filename: Literal["logo.png"] | None = None
+    alert_webhook_url: str | None = None
+    alert_webhook_secret_env: str | None = None
+    alert_allow_insecure_http: bool = False
     sounds_dir: Path = Path("sounds")
     state_dir: Path = Path("state")
     log_dir: Path = Path("logs")
@@ -291,6 +317,36 @@ class Settings(BaseModel):
         except UnicodeEncodeError as exc:
             raise ValueError("must contain ASCII characters only") from exc
         return value
+
+    @field_validator("school_name", "console_subtitle")
+    @classmethod
+    def branding_text_is_safe(cls, value: str) -> str:
+        stripped = value.strip()
+        if any(ord(character) < 32 or ord(character) == 127 for character in stripped):
+            raise ValueError("must not contain control characters")
+        return stripped
+
+    @field_validator("alert_webhook_secret_env")
+    @classmethod
+    def alert_environment_name_is_safe(cls, value: str | None) -> str | None:
+        if value and not re.fullmatch(r"[A-Z][A-Z0-9_]{2,127}", value):
+            raise ValueError("alert_webhook_secret_env must be a safe uppercase environment name")
+        return value
+
+    @model_validator(mode="after")
+    def alert_webhook_is_safe(self) -> Settings:
+        if not self.alert_webhook_url:
+            self.alert_webhook_secret_env = None
+            self.alert_allow_insecure_http = False
+            return self
+        parsed = urlsplit(self.alert_webhook_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("alert_webhook_url must be an absolute HTTP(S) URL")
+        if parsed.username or parsed.password:
+            raise ValueError("alert webhook credentials must not be embedded in the URL")
+        if parsed.scheme == "http" and not self.alert_allow_insecure_http:
+            raise ValueError("plain HTTP alerts require alert_allow_insecure_http: true")
+        return self
 
     @field_validator("wire_format")
     @classmethod
@@ -349,6 +405,12 @@ class BellConfig(BaseModel):
         return _resolve_path(self.settings.log_dir, self.config_dir.parent)
 
     @property
+    def logo_path(self) -> Path | None:
+        if not self.settings.logo_filename:
+            return None
+        return self.state_path / "branding" / self.settings.logo_filename
+
+    @property
     def hash(self) -> str:
         digest = hashlib.sha256()
         for path in sorted(self.config_dir.glob("*.yaml")):
@@ -384,7 +446,13 @@ def _format_validation(prefix: str, exc: ValidationError) -> list[str]:
 def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
     directory = Path(config_dir).expanduser().resolve()
     errors: list[str] = []
-    required = ("settings.yaml", "destinations.yaml", "zones.yaml", "schedules.yaml", "calendar.yaml")
+    required = (
+        "settings.yaml",
+        "destinations.yaml",
+        "zones.yaml",
+        "schedules.yaml",
+        "calendar.yaml",
+    )
     raw: dict[str, Any] = {}
     for filename in required:
         path = directory / filename
@@ -459,7 +527,9 @@ def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
             errors.append(f"{context}, event {event.label!r}: unknown zone {event.zone!r}")
         sound = config.sounds_path / event.sound
         if not sound.is_file() or not os.access(sound, os.R_OK):
-            errors.append(f"{context}, event {event.label!r}: sound is missing or unreadable: {sound}")
+            errors.append(
+                f"{context}, event {event.label!r}: sound is missing or unreadable: {sound}"
+            )
         if event.pre_tone:
             pre_tone = config.sounds_path / event.pre_tone
             if not pre_tone.is_file() or not os.access(pre_tone, os.R_OK):
@@ -471,7 +541,9 @@ def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
                 f"{context}, event {event.label!r}: repeat_count {event.repeat_count} exceeds "
                 f"safety max_repeats {config.safety.max_repeats}"
             )
-        if not _within_window(event.time, config.safety.allowed_hours_start, config.safety.allowed_hours_end):
+        if not _within_window(
+            event.time, config.safety.allowed_hours_start, config.safety.allowed_hours_end
+        ):
             errors.append(
                 f"{context}, event {event.label!r} at {event.time:%H:%M} is outside safety window "
                 f"{config.safety.allowed_hours_start:%H:%M}-{config.safety.allowed_hours_end:%H:%M}"
@@ -482,6 +554,15 @@ def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
     for name in sorted(set(referenced)):
         if name not in schedules:
             errors.append(f"calendar references unknown schedule {name!r}")
+    if config.logo_path is not None:
+        if not config.logo_path.is_file() or not os.access(config.logo_path, os.R_OK):
+            errors.append(f"configured school logo is missing or unreadable: {config.logo_path}")
+        else:
+            try:
+                if config.logo_path.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
+                    errors.append("configured school logo is not a normalized PNG image")
+            except OSError as exc:
+                errors.append(f"configured school logo is unreadable: {exc}")
     if errors:
         raise ConfigLoadError(errors)
     return config

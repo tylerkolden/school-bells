@@ -41,9 +41,10 @@ class EndpointRegistry:
     def record(self, outcome: DeliveryOutcome) -> None:
         now = datetime.now(UTC).isoformat()
         with self._lock:
-            health = self._items.setdefault(
-                outcome.destination, EndpointHealth(outcome.destination, outcome.protocol)
-            )
+            health = self._items.get(outcome.destination)
+            if health is None or health.protocol != outcome.protocol:
+                health = EndpointHealth(outcome.destination, outcome.protocol)
+                self._items[outcome.destination] = health
             health.last_checked = now
             health.detail = outcome.detail
             if outcome.success:
@@ -57,6 +58,17 @@ class EndpointRegistry:
                 if health.consecutive_failures >= self.failure_threshold:
                     health.state = "circuit_open"
                     health.circuit_open_until = time.monotonic() + self.cooldown_seconds
+
+    def reconcile(self, destinations: list[Destination]) -> None:
+        """Discard health/circuit state that no longer describes the live configuration."""
+        configured = {item.name: item for item in destinations if item.enabled}
+        with self._lock:
+            for name in set(self._items) - set(configured):
+                del self._items[name]
+            for name, destination in configured.items():
+                health = self._items.get(name)
+                if health is not None and health.protocol != destination.protocol:
+                    self._items[name] = EndpointHealth(name, destination.protocol)
 
     def should_attempt(self, destination: Destination) -> bool:
         if destination.required:
@@ -98,6 +110,7 @@ class EndpointMonitor:
 
     def update_config(self, config: BellConfig) -> None:
         self.config = config
+        self.registry.reconcile(config.destinations)
 
     def check_once(self) -> list[DeliveryOutcome]:
         destinations = [item for item in self.config.destinations if item.enabled]

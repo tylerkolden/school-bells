@@ -26,6 +26,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from bell.alerts import AlertDispatcher
 from bell.audio import transcode
 from bell.config import BellConfig, BellEvent, ConfigLoadError, load_config
 from bell.delivery import DeliveryManager, DeliveryReport, PageDeliveryError
@@ -93,8 +94,10 @@ def validate_startup(config: BellConfig) -> list[str]:
             errors.append(f"{name} must contain at least {minimum} characters")
     normal_api_key = os.environ.get("BELL_API_KEY")
     emergency_api_key = os.environ.get("BELL_EMERGENCY_API_KEY")
-    if normal_api_key and emergency_api_key and secrets.compare_digest(
-        normal_api_key, emergency_api_key
+    if (
+        normal_api_key
+        and emergency_api_key
+        and secrets.compare_digest(normal_api_key, emergency_api_key)
     ):
         errors.append("BELL_API_KEY and BELL_EMERGENCY_API_KEY must be different")
     tls_certificate = os.environ.get("BELL_TLS_CERTFILE")
@@ -115,7 +118,9 @@ def validate_startup(config: BellConfig) -> list[str]:
             if event.pre_tone
         )
         sounds.update(item.sound for item in config.standing_items if item.enabled)
-        sounds.update(item.pre_tone for item in config.standing_items if item.enabled and item.pre_tone)
+        sounds.update(
+            item.pre_tone for item in config.standing_items if item.enabled and item.pre_tone
+        )
         codecs = {
             codec
             for endpoint in config.destinations
@@ -160,10 +165,14 @@ def validate_startup(config: BellConfig) -> list[str]:
         secret_env = (
             endpoint.sip_password_env
             if endpoint.protocol == "sip"
-            else endpoint.webhook_secret_env if endpoint.protocol == "http" else None
+            else endpoint.webhook_secret_env
+            if endpoint.protocol == "http"
+            else None
         )
         if secret_env and not os.environ.get(secret_env) and endpoint.required:
-            errors.append(f"required destination {endpoint.name}: environment variable {secret_env} is not set")
+            errors.append(
+                f"required destination {endpoint.name}: environment variable {secret_env} is not set"
+            )
     synced, detail = clock_sync_status()
     if synced is not True and config.settings.clock_sync_required:
         errors.append(f"system clock is not synchronized: {detail}")
@@ -178,6 +187,7 @@ class ServiceRuntime:
         self.started_monotonic = time.monotonic()
         self.last_fire: dict[str, Any] | None = None
         self.coordinator = PageCoordinator()
+        self.alerts = AlertDispatcher(config.settings)
         self.endpoint_registry = EndpointRegistry()
         self.delivery = DeliveryManager(config, self.endpoint_registry)
         self.monitor = EndpointMonitor(config, self.endpoint_registry)
@@ -190,17 +200,26 @@ class ServiceRuntime:
         self.scheduler.config = refreshed
         self.delivery.update_config(refreshed)
         self.monitor.update_config(refreshed)
+        # Refresh endpoint truth synchronously so a saved routing change does not
+        # display or act on stale protocol/circuit state until the next monitor cycle.
+        self.monitor.check_once()
+        self.alerts.update_settings(refreshed.settings)
         self.scheduler.register_day(
             datetime.now(self.scheduler.timezone).date(), include_recent_misfires=False
         )
         LOGGER.info("configuration_reloaded", extra={"config_hash": refreshed.hash})
+
+    def cancel_active_page(self, reason: str = "operator stop") -> bool:
+        return self.coordinator.cancel_active(reason)
 
     def health_data(self) -> dict[str, Any]:
         sync, sync_detail = clock_sync_status()
         jobs = [job for job in self.scheduler.scheduler.get_jobs() if job.next_run_time]
         next_fire = min((job.next_run_time for job in jobs), default=None)
         endpoints = self.endpoint_registry.snapshot()
-        required = {item.name for item in self.config.destinations if item.enabled and item.required}
+        required = {
+            item.name for item in self.config.destinations if item.enabled and item.required
+        }
         unhealthy = [
             item["name"]
             for item in endpoints
@@ -221,6 +240,9 @@ class ServiceRuntime:
             reasons.append("scheduler not running")
         if not monitor_running:
             reasons.append("endpoint monitor not running")
+        disk = shutil.disk_usage(self.config.config_dir.parent)
+        if disk.free < 256 * 1024 * 1024:
+            reasons.append("storage critically low")
         return {
             "status": "degraded" if reasons else "ok",
             "ready": not reasons,
@@ -230,7 +252,22 @@ class ServiceRuntime:
             "config_hash": self.config.hash,
             "kill_switch": {
                 "enabled": self.config.safety.kill_switch_enabled,
-                "until": str(self.config.safety.kill_switch_until) if self.config.safety.kill_switch_until else None,
+                "until": str(self.config.safety.kill_switch_until)
+                if self.config.safety.kill_switch_until
+                else None,
+            },
+            "pause": {
+                "active": bool(
+                    self.config.safety.pause_until
+                    and datetime.now(ZoneInfo(self.config.settings.timezone))
+                    < self.config.safety.pause_until
+                ),
+                "until": (
+                    self.config.safety.pause_until.isoformat()
+                    if self.config.safety.pause_until
+                    else None
+                ),
+                "reason": self.config.safety.pause_reason,
             },
             "uptime_seconds": time.monotonic() - self.started_monotonic,
             "clock": {"synchronized": sync, "detail": sync_detail},
@@ -241,6 +278,7 @@ class ServiceRuntime:
             "scheduler_running": scheduler_running,
             "monitor_running": monitor_running,
             "config_valid": True,
+            "storage": {"total": disk.total, "used": disk.used, "free": disk.free},
         }
 
     def transmit_event(self, event: BellEvent, config: BellConfig, schedule_name: str) -> object:
@@ -275,16 +313,13 @@ class ServiceRuntime:
             uses_poly = any(
                 destination.enabled
                 and destination.protocol == "multicast"
-                and (destination.wire_format or config.settings.wire_format)
-                == "poly_group_page"
+                and (destination.wire_format or config.settings.wire_format) == "poly_group_page"
                 for name in zone.destinations
                 if (destination := config.destination_map.get(name)) is not None
             )
             if uses_poly:
                 transmission_count = event.repeat_count + int(event.pre_tone is not None)
-                total_duration += (
-                    PolyGroupPage.session_overhead_seconds * transmission_count
-                )
+                total_duration += PolyGroupPage.session_overhead_seconds * transmission_count
             if total_duration > config.settings.max_page_seconds:
                 raise PageDeliveryError(
                     f"page duration {total_duration:.2f}s exceeds max_page_seconds "
@@ -365,6 +400,12 @@ class ServiceRuntime:
                 "detail": str(exc),
             }
             LOGGER.exception("bell_transmission", extra=self.last_fire)
+            self.alerts.send(
+                "bell_transmission_failed",
+                f"{event.label} failed in zone {zone.name}",
+                severity="critical",
+                details=self.last_fire,
+            )
             raise
 
     def _health_app(self) -> FastAPI:
@@ -471,6 +512,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         scheduler=runtime.scheduler,
         reload_callback=runtime.reload_config,
         health_provider=runtime.health_data,
+        cancel_callback=runtime.cancel_active_page,
     )
     office_server = uvicorn.Server(
         uvicorn.Config(
@@ -507,6 +549,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     notify("READY=1\nSTATUS=School bell scheduler and operator console started")
     heartbeat_seconds = watchdog_interval()
     last_heartbeat = 0.0
+    last_health_check = 0.0
+    last_ready: bool | None = None
     component_failed = False
     while not stopping.wait(min(1.0, heartbeat_seconds)):
         if not (
@@ -523,6 +567,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         if time.monotonic() - last_heartbeat >= heartbeat_seconds:
             notify("WATCHDOG=1")
             last_heartbeat = time.monotonic()
+        if time.monotonic() - last_health_check >= 15:
+            health = runtime.health_data()
+            ready = bool(health["ready"])
+            if ready != last_ready:
+                if ready:
+                    runtime.alerts.send(
+                        "service_recovered",
+                        "Bell service readiness recovered",
+                        severity="info",
+                        details={"readiness_reasons": []},
+                    )
+                else:
+                    runtime.alerts.send(
+                        "service_degraded",
+                        "Bell service needs attention",
+                        severity="critical",
+                        details={"readiness_reasons": health["readiness_reasons"]},
+                    )
+                last_ready = ready
+            last_health_check = time.monotonic()
     LOGGER.info("bell_service_stopping")
     notify("STOPPING=1\nSTATUS=School bell service stopping")
     runtime.scheduler.shutdown(wait=True)

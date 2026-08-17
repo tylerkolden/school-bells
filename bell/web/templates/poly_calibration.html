@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Poly capture · School Bell{% endblock %}
+{% block title %}Poly capture · {{ brand.school_name }}{% endblock %}
 {% block content %}
 <div class="page-heading"><div><span class="eyebrow">Network calibration</span><h1>Guided Poly capture</h1><p class="lede">Verify this site's Poly Group Page framing against real phone-VLAN traffic.</p></div><a class="button secondary" href="/setup#destinations">Back to destinations</a></div>
 {% if message %}<div class="notice info" role="status"><strong>{{ message }}</strong></div>{% endif %}
