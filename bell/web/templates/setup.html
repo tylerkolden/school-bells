@@ -45,6 +45,7 @@
 {% block content %}
 <div class="page-heading"><div><span class="eyebrow">Administration</span><h1>System setup</h1><p class="lede">Manage the reusable building blocks behind schedules and paging.</p></div></div>
 {% if message %}<div class="notice info" role="status"><strong>{{ message }}</strong></div>{% endif %}
+{% if error %}<div class="notice danger" role="alert"><strong>That change was not saved.</strong>{{ error }}</div>{% endif %}
 <nav class="setup-jump" aria-label="Setup sections"><a href="#branding">Branding</a><a href="#standing-items">Standing items</a><a href="#calendar-rules">Calendar rules</a><a href="#sounds">Sounds</a><a href="#zones">Zones</a><a href="#destinations">Destinations</a><a href="#settings">Safety &amp; settings</a></nav>
 
 <section id="branding" class="admin-section">
@@ -73,8 +74,8 @@
 </section>
 
 <section id="sounds" class="admin-section">
-  <div class="admin-section-heading"><div><span class="overline">Audio library</span><h2>Sounds</h2><p>Upload common audio formats; the server validates, normalizes, and stores 8 kHz mono WAV.</p></div></div>
-  <form action="/setup/sounds/save" method="post" enctype="multipart/form-data" class="card sound-upload">{{ tokens() }}<input type="hidden" name="existing_name" value=""><label>Library name<input name="desired_name" maxlength="100" required placeholder="assembly-chime"></label><label>Audio file<input type="file" name="audio_file" accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus" required></label><button class="primary">Upload &amp; prepare</button></form>
+  <div class="admin-section-heading"><div><span class="overline">Audio library</span><h2>Sounds</h2><p>Upload common audio formats; the server validates, normalizes, and stores 8 kHz mono WAV. Maximum duration: {{ config.settings.max_audio_seconds|int }} seconds.</p></div></div>
+  <form action="/setup/sounds/save" method="post" enctype="multipart/form-data" class="card sound-upload" data-sound-upload>{{ tokens() }}<input type="hidden" name="existing_name" value=""><label>Library name <small>(optional)</small><input name="desired_name" maxlength="100" placeholder="Uses the file name when blank"></label><label>Audio file<input type="file" name="audio_file" accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus" required><small class="field-help">WAV, MP3, M4A, AAC, FLAC, OGG, or Opus · maximum 50 MiB</small></label><button class="primary">Upload &amp; prepare</button></form>
   <div class="asset-grid">{% for sound in sounds %}<article class="asset-card card"><div><strong>{{ sound }}</strong><small>{% if sound_references[sound] %}Used by {{ sound_references[sound]|length }} event{% if sound_references[sound]|length != 1 %}s{% endif %}{% else %}Unused{% endif %}</small></div><audio controls preload="none" src="/sounds/{{ sound|urlencode }}"></audio><details><summary>Replace audio</summary><form action="/setup/sounds/save" method="post" enctype="multipart/form-data">{{ tokens() }}<input type="hidden" name="existing_name" value="{{ sound }}"><input type="hidden" name="desired_name" value="{{ sound }}"><input type="file" name="audio_file" accept="audio/*" required><button class="secondary">Validate &amp; replace</button></form></details><form action="/setup/sounds/delete" method="post" data-confirm="Delete {{ sound }}?">{{ tokens() }}<input type="hidden" name="sound_name" value="{{ sound }}"><button class="danger-button"{% if sound_references[sound] %} disabled title="Remove all event references first"{% endif %}>Delete</button></form>{% if sound_references[sound] %}<small class="dependency-note">{{ sound_references[sound]|join(', ') }}</small>{% endif %}</article>{% endfor %}</div>
 </section>
 

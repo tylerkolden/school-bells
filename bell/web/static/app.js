@@ -280,6 +280,19 @@ document.querySelectorAll("form[data-confirm]").forEach((form) => {
   });
 });
 
+document.querySelectorAll("form[data-sound-upload]").forEach((form) => {
+  const file = form.querySelector('input[name="audio_file"]');
+  const name = form.querySelector('input[name="desired_name"]');
+  file?.addEventListener("change", () => {
+    if (!file.files?.length || name.value.trim()) return;
+    const filename = file.files[0].name.replace(/\.[^.]+$/, "");
+    name.value = filename
+      .replace(/[^A-Za-z0-9._ -]+/g, "-")
+      .replace(/^[^A-Za-z0-9]+/, "")
+      .slice(0, 96);
+  });
+});
+
 document.querySelectorAll("form[data-capture-form]").forEach((form) => {
   form.addEventListener("submit", () => {
     const button = form.querySelector('button[type="submit"], button:not([type])');

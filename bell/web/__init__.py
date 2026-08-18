@@ -1222,6 +1222,7 @@ def create_app(
         new_zone: bool = False,
         new_destination: bool = False,
         message: str | None = None,
+        error: str | None = None,
     ) -> HTMLResponse:
         require_auth(request)
         cfg = config()
@@ -1241,6 +1242,7 @@ def create_app(
             new_destination=new_destination,
             available_channels=sorted({23, 24, 25} - {zone.channel for zone in cfg.zones}),
             message=message,
+            error=error,
         )
 
     @app.post("/setup/branding/save")
@@ -2153,18 +2155,25 @@ def create_app(
             )
         return f"{normalized}.wav"
 
+    def sound_error(message: str) -> RedirectResponse:
+        return RedirectResponse(
+            f"/setup?{urlencode({'error': message})}#sounds",
+            status_code=303,
+        )
+
     @app.post("/setup/sounds/save")
     async def sound_save(
         request: Request,
         audio_file: UploadFile = File(),  # noqa: B008
-        desired_name: str = Form(),
+        desired_name: str = Form(default=""),
         existing_name: str = Form(default=""),
         config_hash: str = Form(default=""),
         csrf: str = Form(),
     ) -> RedirectResponse:
         require_auth(request)
         verify_csrf(request, csrf)
-        target_name = valid_sound_target(desired_name)
+        uploaded_name = Path(audio_file.filename or "").stem
+        target_name = valid_sound_target(desired_name or uploaded_name)
         if existing_name and target_name != existing_name:
             raise HTTPException(
                 400, "Replacement keeps the existing name; create a new sound to rename"
@@ -2184,21 +2193,28 @@ def create_app(
                 while chunk := await audio_file.read(1024 * 1024):
                     total += len(chunk)
                     if total > 50 * 1024 * 1024:
-                        raise HTTPException(413, "Audio upload exceeds the 50 MiB limit")
+                        return sound_error("The selected audio file exceeds the 50 MiB limit.")
                     handle.write(chunk)
             if not total:
-                raise HTTPException(400, "Uploaded audio file is empty")
+                return sound_error("The selected audio file is empty.")
             info = probe_audio(source_path)
             if info.duration <= 0 or info.duration > cfg.settings.max_audio_seconds:
-                raise HTTPException(
-                    400,
-                    f"Audio duration must be greater than zero and no more than {cfg.settings.max_audio_seconds:g} seconds",
+                return sound_error(
+                    "Audio must contain sound and be no longer than "
+                    f"{cfg.settings.max_audio_seconds:g} seconds."
                 )
             prepared_path = staging_dir / f"prepared-{secrets.token_hex(8)}.wav"
             prep(source_path, prepared_path, max_seconds=cfg.settings.max_audio_seconds)
             prepared = probe_audio(prepared_path)
-            if prepared.sample_rate != 8000 or prepared.channels != 1:
-                raise HTTPException(400, "Prepared audio is not 8 kHz mono")
+            if (
+                prepared.duration <= 0
+                or prepared.sample_rate != 8000
+                or prepared.channels != 1
+            ):
+                return sound_error(
+                    "The prepared file contains no audible audio. "
+                    "Try exporting it again as PCM WAV, MP3, or FLAC."
+                )
             target = cfg.sounds_path / target_name
             with config_lock:
                 current = config()
@@ -2248,8 +2264,18 @@ def create_app(
                     raise HTTPException(
                         500, "The sound could not be activated; the previous library was restored"
                     ) from exc
-        except (AudioProcessingError, AudioToolMissing) as exc:
-            raise HTTPException(400, f"Audio could not be prepared: {exc}") from exc
+        except (AudioProcessingError, AudioToolMissing):
+            LOGGER.info("sound_upload_decode_failed")
+            return sound_error(
+                "The audio could not be decoded. Try exporting it as PCM WAV, MP3, "
+                "M4A, FLAC, OGG, or Opus, then upload it again."
+            )
+        except OSError:
+            LOGGER.exception("sound_upload_storage_failed")
+            return sound_error(
+                "The sound library could not be written. Install the latest update and "
+                "try again; details were recorded in the service log."
+            )
         finally:
             await audio_file.close()
             if source_path:
