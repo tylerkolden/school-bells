@@ -161,7 +161,9 @@ and delete actions use the same stale-edit detection and rollback pipeline. Refe
 zones, and destinations cannot be deleted until their dependents are changed. Multicast edits
 validate an IPv4 multicast address and UDP port, and select exactly one receiver-compatible codec.
 Uploaded audio is bounded,
-validated by FFmpeg, normalized, and stored as 8 kHz mono WAV before it enters the library.
+validated by FFmpeg, normalized, and stored as 8 kHz mono WAV before it enters the library. The
+upload form shows the active duration and size limits and uses the uploaded filename when a library
+name is not supplied.
 
 Administrators can also set the school name and console subtitle, and upload a PNG, JPEG, or WebP
 logo. The server decodes and rewrites the upload as a bounded PNG before use. **Accounts** can

@@ -306,8 +306,8 @@ def test_sound_create_replace_delete_and_reference_guard(
     source = config_tree.parent / "sounds" / "class-bell.wav"
     created = client.post(
         "/setup/sounds/save",
-        data={**tokens(client), "desired_name": "test tone", "existing_name": ""},
-        files={"audio_file": ("tone.mp3", source.read_bytes(), "audio/mpeg")},
+        data={**tokens(client), "desired_name": "", "existing_name": ""},
+        files={"audio_file": ("test tone.mp3", source.read_bytes(), "audio/mpeg")},
         follow_redirects=False,
     )
     assert created.status_code == 303
@@ -341,6 +341,60 @@ def test_sound_create_replace_delete_and_reference_guard(
     )
     assert protected.status_code == 409
     assert "still used" in protected.text
+
+
+def test_sound_upload_reports_storage_failure_in_setup(
+    config_tree: Path, monkeypatch
+) -> None:
+    def fake_probe(_path: Path) -> AudioInfo:
+        return AudioInfo(duration=1.0, sample_rate=8000, channels=1, peak_dbfs=-3.0)
+
+    def denied_prep(_source: Path, _destination: Path, **_kwargs) -> Path:
+        raise PermissionError("read-only sound library")
+
+    monkeypatch.setattr("bell.web.probe_audio", fake_probe)
+    monkeypatch.setattr("bell.web.prep", denied_prep)
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+    source = config_tree.parent / "sounds" / "class-bell.wav"
+    response = client.post(
+        "/setup/sounds/save",
+        data={**tokens(client), "desired_name": "new bell", "existing_name": ""},
+        files={"audio_file": ("new-bell.wav", source.read_bytes(), "audio/wav")},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "sound+library+could+not+be+written" in response.headers["location"].lower()
+
+
+def test_sound_upload_rejects_silent_prepared_audio(config_tree: Path, monkeypatch) -> None:
+    probes = iter(
+        [
+            AudioInfo(duration=1.0, sample_rate=44100, channels=2, peak_dbfs=-91.0),
+            AudioInfo(duration=0.0, sample_rate=8000, channels=1, peak_dbfs=None),
+        ]
+    )
+
+    def fake_probe(_path: Path) -> AudioInfo:
+        return next(probes)
+
+    def fake_prep(_source: Path, destination: Path, **_kwargs) -> Path:
+        destination.write_bytes(b"empty prepared wave")
+        return destination
+
+    monkeypatch.setattr("bell.web.probe_audio", fake_probe)
+    monkeypatch.setattr("bell.web.prep", fake_prep)
+    client = TestClient(create_app(config_tree, password="test"))
+    login(client)
+    response = client.post(
+        "/setup/sounds/save",
+        data={**tokens(client), "desired_name": "silent bell", "existing_name": ""},
+        files={"audio_file": ("silent.wav", b"source audio", "audio/wav")},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "contains+no+audible+audio" in response.headers["location"].lower()
+    assert not (config_tree.parent / "sounds" / "silent bell.wav").exists()
 
 
 def test_calendar_defaults_and_date_range_crud(config_tree: Path) -> None:
