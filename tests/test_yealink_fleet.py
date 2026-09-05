@@ -2,19 +2,50 @@ from __future__ import annotations
 
 import base64
 import shutil
+import ssl
 import subprocess
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from scripts.yealink_fleet import (
     PageParser,
+    YealinkClient,
     aes_encrypt_password,
+    certificate_fingerprint,
     contexts_for,
     extract_rsa_key,
     normalize_fingerprint,
     redact_context,
     rsa_encrypt_text,
 )
+
+
+def test_fingerprint_probe_requires_modern_tls(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+    monkeypatch.setattr(
+        "scripts.yealink_fleet.ssl",
+        SimpleNamespace(**{**vars(ssl), "SSLContext": lambda protocol: context}),
+    )
+    monkeypatch.setattr("scripts.yealink_fleet.socket.create_connection", MagicMock())
+    secure = MagicMock()
+    secure.__enter__.return_value.getpeercert.return_value = b"test certificate"
+    monkeypatch.setattr(context, "wrap_socket", lambda *args, **kwargs: secure)
+    certificate_fingerprint("phone.example", 443, 1)
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+
+
+def test_authenticated_client_requires_modern_tls(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+    monkeypatch.setattr(
+        "scripts.yealink_fleet.ssl",
+        SimpleNamespace(**{**vars(ssl), "SSLContext": lambda protocol: context}),
+    )
+    YealinkClient("phone.example", "AB" * 32, "test", "test")
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
 
 MODULUS = (
     "D36E437448D97C95DC0D217FBF1521F984DCE34459ED0119B4D91172A23DC35"

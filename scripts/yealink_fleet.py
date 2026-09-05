@@ -72,6 +72,7 @@ def normalize_fingerprint(value: str) -> str:
 
 def certificate_fingerprint(host: str, port: int, timeout: float) -> str:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     with (
@@ -249,6 +250,7 @@ class YealinkClient:
         self.timeout = timeout
         self.cookies = CookieJar()
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         self.opener = build_opener(
