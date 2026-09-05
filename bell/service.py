@@ -17,7 +17,7 @@ import threading
 import time
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -187,7 +187,7 @@ class ServiceRuntime:
         self.started_monotonic = time.monotonic()
         self.last_fire: dict[str, Any] | None = None
         self.coordinator = PageCoordinator()
-        self.alerts = AlertDispatcher(config.settings)
+        self.alerts = AlertDispatcher(config.settings, outbox_path=config.state_path / "alerts.sqlite3")
         self.endpoint_registry = EndpointRegistry()
         self.delivery = DeliveryManager(config, self.endpoint_registry)
         self.monitor = EndpointMonitor(config, self.endpoint_registry)
@@ -245,6 +245,7 @@ class ServiceRuntime:
             reasons.append("storage critically low")
         return {
             "status": "degraded" if reasons else "ok",
+            "observed_at": datetime.now(UTC).isoformat(),
             "ready": not reasons,
             "readiness_reasons": reasons,
             "last_fire": self.last_fire,
@@ -278,6 +279,7 @@ class ServiceRuntime:
             "scheduler_running": scheduler_running,
             "monitor_running": monitor_running,
             "config_valid": True,
+            "notifications": self.alerts.snapshot(),
             "storage": {"total": disk.total, "used": disk.used, "free": disk.free},
         }
 
@@ -400,7 +402,7 @@ class ServiceRuntime:
                 "detail": str(exc),
             }
             LOGGER.exception("bell_transmission", extra=self.last_fire)
-            self.alerts.send(
+            self.alerts.enqueue(
                 "bell_transmission_failed",
                 f"{event.label} failed in zone {zone.name}",
                 severity="critical",
@@ -567,19 +569,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if time.monotonic() - last_heartbeat >= heartbeat_seconds:
             notify("WATCHDOG=1")
             last_heartbeat = time.monotonic()
+        runtime.alerts.retry_pending()
         if time.monotonic() - last_health_check >= 15:
             health = runtime.health_data()
             ready = bool(health["ready"])
             if ready != last_ready:
                 if ready:
-                    runtime.alerts.send(
+                    runtime.alerts.enqueue(
                         "service_recovered",
                         "Bell service readiness recovered",
                         severity="info",
                         details={"readiness_reasons": []},
                     )
                 else:
-                    runtime.alerts.send(
+                    runtime.alerts.enqueue(
                         "service_degraded",
                         "Bell service needs attention",
                         severity="critical",

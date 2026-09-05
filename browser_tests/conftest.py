@@ -43,7 +43,7 @@ def console(page, tmp_path, monkeypatch, request):
                                "username": "office" if role == "operator" else "admin", "csrf": csrf})
     snapshot = client.get("/operations/snapshot").json()
     snapshot.update(ready=True, blocked_reasons=[])
-    controls = {"status": 200, "snapshot": snapshot}
+    controls = {"status": 200, "snapshot": snapshot, "client": client}
 
     def serve(route):
         path = route.request.url.split("http://testserver", 1)[-1]

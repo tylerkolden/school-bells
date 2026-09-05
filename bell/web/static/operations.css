@@ -122,3 +122,14 @@ h1 { font-size: clamp(1.7rem, 3vw, 2.5rem); }
   .save-bar .primary { font-size: .9rem; padding: .6rem; }
   .event-editor-summary { overflow-wrap: anywhere; }
 }
+
+/* Date review and continuity ownership. */
+.review-days { display: grid; gap: 1rem; margin-block: 1rem; }
+.review-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.review-day h2 { font-size: 1.15rem; }
+.review-apply { margin-block: 1.5rem; }
+.continuity-card { margin-bottom: 1rem; }
+.continuity-card details { margin-block: 1rem; }
+.continuity-card form { margin-top: 1rem; }
+.review-days p, .continuity-card p { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .review-comparison { grid-template-columns: 1fr; } }

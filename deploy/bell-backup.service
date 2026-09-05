@@ -1,0 +1,16 @@
+[Unit]
+Description=Verify School Bell backup on an off-device mounted volume
+RequiresMountsFor=/mnt/bell-backups
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=bell
+ExecStart=/opt/bell/current/.venv/bin/python -m bell.continuity --config-dir /opt/bell/config --destination /mnt/bell-backups
+TimeoutStartSec=300
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/mnt/bell-backups
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
