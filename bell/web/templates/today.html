@@ -1,14 +1,15 @@
 {% extends "base.html" %}{% block title %}Today · {{ brand.school_name }}{% endblock %}
 {% block content %}
 <div class="page-heading operations-heading">
-  <div><span class="eyebrow" data-school-date>{{ snapshot.display_date }}</span><h1>Today’s operations</h1><p class="lede">{{ snapshot.schedule or "No active schedule" }}</p></div>
+  <div><span class="eyebrow" data-school-date>{{ snapshot.display_date }}</span><h1>Today’s operations</h1><p class="lede" data-schedule-name>{{ snapshot.schedule or "No active schedule" }}</p></div>
   <div class="button-row"><a class="button secondary" href="/calendar">Change today</a><a class="button primary" href="/manual">Ring a sound now</a></div>
 </div>
 {% if message %}<div class="notice info" role="status"><strong>{{ message }}</strong></div>{% endif %}
-{% if kill_switch %}<div class="notice danger" role="alert"><strong>Bell transmission is disabled.</strong>The permanent kill switch is on; no scheduled or manual bells can ring.</div>{% endif %}
-{% if snapshot.pause.active %}<div class="notice warning" role="alert" data-pause-notice><strong>Scheduled bells are paused.</strong><span data-pause-detail>{{ snapshot.pause.reason }} · until {{ snapshot.pause.until }}</span></div>{% endif %}
+<div class="notice danger" role="alert" data-kill-notice {% if not snapshot.kill_switch %}hidden{% endif %}><strong>Bell transmission is disabled.</strong>The kill switch is on; no scheduled or manual bells can ring.</div>
+<div class="notice warning" role="alert" data-pause-notice {% if not snapshot.pause.active %}hidden{% endif %}><strong>Bell transmission is paused.</strong><span data-pause-detail>{{ snapshot.pause.reason }} · until {{ snapshot.pause.until }}</span></div>
 
-<section class="operations-dashboard" data-operations-dashboard data-server-time="{{ snapshot.server_time }}" data-next-time="{{ snapshot.next_bell.time if snapshot.next_bell else '' }}">
+<p data-connection-status role="status">Live state · connecting…</p><div class="notice warning" data-config-changed hidden>Configuration changed. <a href="/">Reload before changing bell controls</a>.</div>
+<section class="operations-dashboard" data-operations-dashboard data-config-hash="{{ snapshot.config_hash }}" data-timezone="{{ snapshot.timezone }}" data-paused="{{ snapshot.pause.active|lower }}" data-server-time="{{ snapshot.server_time }}" data-next-time="{{ snapshot.next_bell.time if snapshot.next_bell else '' }}">
   <article class="operation-card clock-card">
     <span class="overline">School time</span>
     <strong class="school-clock" data-school-clock>{{ now.strftime('%I:%M:%S %p').lstrip('0') }}</strong>
@@ -35,12 +36,10 @@
   </article>
 </section>
 
-{% if snapshot.active_page %}
-<section class="notice danger active-page" data-active-page role="alert">
-  <div><strong>Audio is playing now: <span data-active-label>{{ snapshot.active_page.label }}</span></strong><span>Stopping ends new audio packets at the next safe cancellation point.</span></div>
+<section class="notice danger active-page" data-active-page role="alert" {% if not snapshot.active_page %}hidden{% endif %}>
+  <div><strong>Audio transmitting now: <span data-active-label>{{ snapshot.active_page.label if snapshot.active_page else '' }}</span></strong><span>Stopping ends new audio packets at the next safe cancellation point.</span></div>
   <form action="/operations/stop" method="post" data-confirm="Stop the active page now?"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="danger-button">Stop active page</button></form>
 </section>
-{% endif %}
 
 <div class="today-layout">
   <section class="schedule-card" aria-labelledby="upcoming-heading">
@@ -51,18 +50,18 @@
   </section>
 
   <aside class="card quick-controls" aria-labelledby="controls-heading">
-    <span class="overline">Immediate control</span><h2 id="controls-heading">Pause scheduled bells</h2>
-    <p>Use a temporary pause for an assembly, testing, or an unexpected closure. Missed bells are never replayed.</p>
-    <form action="/operations/pause" method="post" data-confirm="Apply this bell pause now?">
+    <span class="overline">Immediate control</span><h2 id="controls-heading">Pause bell transmission</h2>
+    <p>Pausing blocks scheduled and manual pages, including emergency-priority pages, and stops current audio. Missed bells are never replayed.</p>
+    <form action="/operations/pause" method="post" data-confirm="Pause all bell transmission and stop current audio?">
       <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="config_hash" value="{{ snapshot.config_hash }}">
       <label>Duration<select name="duration" required><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">60 minutes</option><option value="today">Rest of today</option></select></label>
       <label>Reason<input name="reason" maxlength="200" placeholder="Assembly, testing, closure…" required></label>
       <button class="primary">Pause bells</button>
     </form>
-    {% if snapshot.pause.active %}<form action="/operations/pause" method="post" class="resume-form"><input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="config_hash" value="{{ snapshot.config_hash }}"><input type="hidden" name="duration" value="resume"><button class="secondary">Resume scheduled bells</button></form>{% endif %}
+    <form action="/operations/pause" method="post" class="resume-form" data-resume-form {% if not snapshot.pause.active %}hidden{% endif %}><input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="config_hash" value="{{ snapshot.config_hash }}"><input type="hidden" name="duration" value="resume"><button class="secondary">Resume bell transmission</button></form>
     <a href="/status" class="text-link">Open detailed system status →</a>
   </aside>
 </div>
 
-{% if plan.reason %}<div class="notice warning"><strong>No bells today.</strong>{{ plan.reason }}</div>{% endif %}
+<div class="notice warning" data-no-bells {% if not plan.reason %}hidden{% endif %}><strong>No bells today.</strong><span data-no-bells-reason>{{ plan.reason or "" }}</span></div>
 {% endblock %}
