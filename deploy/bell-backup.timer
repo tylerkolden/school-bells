@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily verified off-device School Bell backup
+
+[Timer]
+OnCalendar=*-*-* 21:00:00 America/Denver
+Persistent=true
+Unit=bell-backup.service
+
+[Install]
+WantedBy=timers.target

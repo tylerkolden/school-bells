@@ -1,0 +1,9 @@
+{
+  "health_url": "https://bells.school.example/api/v1/health",
+  "owner": "REPLACE: primary service owner",
+  "escalation": "REPLACE: responsible backup contact and paging route",
+  "failure_threshold": 3,
+  "recovery_threshold": 2,
+  "reminder_seconds": 600,
+  "escalation_seconds": 1800
+}

@@ -53,3 +53,14 @@ provisioning changes outside this appliance cannot be detected automatically: re
 check after each such change. The history keeps superseded records, while zone cards show
 only each named receiver's latest evidence. Legacy audible checks are explicitly incomplete.
 A recorded success is a human attestation for that receiver, never proof of fleet coverage.
+
+## Operational resilience contract
+
+See [deployment and ownership instructions](OPERATIONAL_RESILIENCE.md). Notification IDs,
+attempt budgets and pending messages persist across restart. Independent monitoring uses a
+health-only key, freshness validation, consecutive failure/recovery thresholds, named ownership,
+acknowledgment and timed escalation. It must be installed on another host; no live destination
+is assumed. Off-device copies require a real mount, verify contents/checksums and retain ten
+archives plus receiver/continuity record snapshots. Staff attestations remain distinct from
+machine checks. School-year review uses actual effective events, and bulk changes require a
+configuration-bound preview before activation.

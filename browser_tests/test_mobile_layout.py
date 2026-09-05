@@ -58,3 +58,29 @@ def test_receiver_evidence_form_fits(page, console, width):
     expect(page.locator('input[name="receiver_id"]').first).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     expect(page.locator('select[name="emergency"]').first).to_have_value("not_tested")
+
+
+@pytest.mark.parametrize("width", [320, 390, 768, 1440])
+def test_continuity_and_calendar_review_fit(page, console, width):
+    import re
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto("http://testserver/recovery")
+    page.get_by_text("Update ownership and witnessed results", exact=True).click()
+    expect(page.get_by_label("Service owner", exact=True)).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.goto("http://testserver/calendar/readiness?start=2027-03-01&end=2027-03-05")
+    expect(page.get_by_role("heading", name="School-year readiness", exact=True)).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    calendar = console["client"].get("/calendar")
+    def field(name):
+        return re.search(rf'name="{name}" value="([^\"]+)"', calendar.text)[1]
+    preview = console["client"].post("/calendar/bulk", data={
+        "start": "2027-03-01", "end": "2027-03-02", "bulk_action": "no_bells",
+        "no_bell_reason": "Spring break", "config_hash": field("config_hash"), "csrf": field("csrf")})
+    assert preview.status_code == 200
+    page.route("**/review-fixture", lambda route: route.fulfill(status=200, body=preview.content, content_type="text/html"))
+    page.goto("http://testserver/review-fixture")
+    expect(page.get_by_role("button", name="Apply reviewed 2 dates")).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    if os.environ.get("BELL_TEST_SCREENSHOTS") and width == 390:
+        page.screenshot(path=str(Path(os.environ["BELL_TEST_SCREENSHOTS"]) / "calendar-review-390.png"), full_page=True)

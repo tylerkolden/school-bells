@@ -19,7 +19,7 @@ PNG = base64.b64decode(
 
 
 def hidden(response, name: str) -> str:
-    match = re.search(rf'name="{name}" value="([^"]+)"', response.text)
+    match = re.search(rf'name="{name}" value="([^"]*)"', response.text)
     assert match
     return match.group(1)
 
@@ -130,6 +130,12 @@ def test_calendar_bulk_export_history_and_commissioning(config_tree: Path) -> No
         },
         follow_redirects=False,
     )
+    assert response.status_code == 200
+    assert date(2027, 3, 2) not in load_config(config_tree).calendar.no_bell_dates
+    response = client.post("/calendar/bulk", data={
+        name: hidden(response, name) for name in ["start", "end", "bulk_action", "schedule_name",
+                                                  "no_bell_reason", "config_hash", "csrf", "review_token"]
+    }, follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/calendar?selected=2027-03-01&month=2027-03"
     changed = load_config(config_tree)
