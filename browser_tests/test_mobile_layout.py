@@ -48,3 +48,13 @@ def test_calendar_and_schedule_are_readable(page, console, width):
     page.get_by_label("Sound", exact=True).select_option("class-bell.wav")
     expect(page.locator("[data-manual-preview]")).to_have_attribute("src", "/sounds/class-bell.wav")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.parametrize("width", [320, 390, 1440])
+def test_receiver_evidence_form_fits(page, console, width):
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto("http://testserver/commissioning")
+    page.get_by_text("Record receiver checks", exact=True).first.click()
+    expect(page.locator('input[name="receiver_id"]').first).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    expect(page.locator('select[name="emergency"]').first).to_have_value("not_tested")
