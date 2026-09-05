@@ -5,6 +5,9 @@ if (operations) {
   let serverEpoch = new Date(operations.dataset.serverTime).getTime();
   let receivedEpoch = Date.now();
   let nextRefreshAfter = 0;
+  let fresh = true;
+  let refreshing = false;
+  let timezone = operations.dataset.timezone || "America/Denver";
 
   const serverNow = () => new Date(serverEpoch + (Date.now() - receivedEpoch));
   const setText = (selector, value) => {
@@ -12,7 +15,7 @@ if (operations) {
     if (element) element.textContent = value;
   };
   const formatClock = (value) => value.toLocaleTimeString("en-US", {
-    hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
+    hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZone: timezone,
   });
   const formatCountdown = (milliseconds) => {
     const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -59,7 +62,23 @@ if (operations) {
     });
   };
   const applySnapshot = (data) => {
+    fresh = true;
+    timezone = data.timezone;
     serverEpoch = new Date(data.server_time).getTime();
+    operations.dataset.paused = String(data.pause.active);
+    setText("[data-schedule-name]", data.schedule || "No active schedule");
+    setText("[data-active-label]", data.active_page?.label || "");
+    document.querySelector("[data-active-page]").hidden = !data.active_page;
+    document.querySelector("[data-pause-notice]").hidden = !data.pause.active;
+    document.querySelector("[data-resume-form]").hidden = !data.pause.active;
+    document.querySelector("[data-kill-notice]").hidden = !data.kill_switch;
+    document.querySelector("[data-no-bells]").hidden = !data.today_reason;
+    setText("[data-no-bells-reason]", data.today_reason || "");
+    setText("[data-pause-detail]", data.pause.active ? `${data.pause.reason} · until ${new Date(data.pause.until).toLocaleString("en-US", {timeZone: timezone})}` : "");
+    const changed = data.config_hash !== operations.dataset.configHash;
+    document.querySelector("[data-config-changed]").hidden = !changed;
+    document.querySelectorAll('form[action="/operations/pause"] button').forEach(button => { button.disabled = changed; });
+    setText("[data-connection-status]", "Live state · updated just now");
     receivedEpoch = Date.now();
     operations.dataset.nextTime = data.next_bell ? data.next_bell.time : "";
     setText("[data-school-date]", data.display_date);
@@ -77,19 +96,45 @@ if (operations) {
     }
     renderUpcoming(data.upcoming);
   };
+  const markStale = (message = "Console disconnected") => {
+    fresh = false;
+    setText("[data-readiness-label]", message);
+    setText("[data-readiness-detail]", "State is unconfirmed. The Pi may still be transmitting.");
+    document.querySelector("[data-readiness-card]").className = "operation-card readiness-card blocked";
+    setText("[data-connection-status]", `Last update ${Math.floor((Date.now() - receivedEpoch) / 1000)} seconds ago · reconnecting`);
+    setText("[data-next-countdown]", "Awaiting live state");
+    document.querySelectorAll('form[action="/operations/pause"] button').forEach(button => { button.disabled = true; });
+  };
   const refresh = async () => {
+    if (refreshing) return;
+    refreshing = true;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 4000);
     try {
-      const response = await window.fetch("/operations/snapshot", { cache: "no-store" });
-      if (response.ok) applySnapshot(await response.json());
+      const response = await window.fetch("/operations/snapshot", { cache: "no-store", signal: controller.signal });
+      if (response.redirected || response.status === 401 || response.status === 403) {
+        markStale("Session expired · sign in again");
+        return;
+      }
+      if (!response.ok) throw new Error("Snapshot unavailable");
+      applySnapshot(await response.json());
     } catch (_error) {
-      setText("[data-readiness-label]", "Console disconnected");
-      setText("[data-readiness-detail]", "Trying to reconnect to the Raspberry Pi");
+      markStale();
+    } finally {
+      window.clearTimeout(timeout);
+      refreshing = false;
     }
   };
   const tick = () => {
+    if (Date.now() - receivedEpoch > 6000) markStale();
+    if (!fresh) return;
     const now = serverNow();
     setText("[data-school-clock]", formatClock(now));
     const target = operations.dataset.nextTime;
+    if (operations.dataset.paused === "true") {
+      setText("[data-next-countdown]", "Will not ring while paused");
+      return;
+    }
     if (!target) {
       setText("[data-next-countdown]", "None in the next year");
       return;
@@ -103,7 +148,9 @@ if (operations) {
   };
   tick();
   window.setInterval(tick, 1000);
-  window.setInterval(refresh, 15000);
+  refresh();
+  window.setInterval(refresh, 2000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 }
 
 const scheduleName = document.querySelector("#schedule-name");
@@ -356,4 +403,11 @@ document.querySelectorAll("[data-destination-fields]").forEach((container) => {
   wireFormat?.addEventListener("change", refreshProtocol);
   codecOptions.forEach((option) => option.addEventListener("change", () => normalizeMulticastCodecs(option)));
   refreshProtocol();
+});
+
+// Reduce accidental resubmission; the server remains the single-use authority.
+document.querySelectorAll('form[action="/manual/fire"]').forEach(form => {
+  form.addEventListener("submit", () => {
+    form.querySelectorAll("button").forEach(button => { button.disabled = true; });
+  });
 });

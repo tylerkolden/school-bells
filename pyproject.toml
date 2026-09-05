@@ -21,6 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+browser = ["pytest-playwright>=0.7"]
 dev = [
   "build>=1.2",
   "httpx2>=2.10",

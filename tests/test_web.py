@@ -102,7 +102,7 @@ def test_out_of_hours_manual_is_blocked_without_override(config_tree: Path, monk
         follow_redirects=False,
     )
     assert result.status_code == 303
-    assert "outside%20allowed%20bell%20hours" in result.headers["location"]
+    assert "outside+allowed+bell+hours" in result.headers["location"]
 
 
 def test_manual_explains_after_hours_and_links_local_receiver(
