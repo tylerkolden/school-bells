@@ -43,6 +43,8 @@ include-package-data = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Standalone diagnostic scripts are tested from the checkout, not installed in the wheel.
+pythonpath = ["."]
 addopts = "-ra"
 
 [tool.ruff]

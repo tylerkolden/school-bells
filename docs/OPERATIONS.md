@@ -55,6 +55,13 @@ is in Poly Group Page Receiver mode and subscribed to the exact group. A channel
 Poly framing or codec mismatch can let phones behave differently from the horn. Re-run the golden capture
 test and inspect the Algo Group 24 checkbox, especially after the capture procedure.
 
+## Bells put office calls on hold
+
+Check the receiving phone's Paging Barge policy using the
+[call-interruption runbook](CALL_INTERRUPTION.md). It provides a provider-side override,
+rollback steps, and idle/active-call/emergency tests. Pi event priority and `busy_policy`
+do not detect telephone calls. Verify emergency coverage before disabling receiver barge-in.
+
 ## Everything rings an hour off
 
 Run `timedatectl status`: timezone must be `America/Denver` and NTP synchronized. Check the health
