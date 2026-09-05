@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import http.client
 import shutil
 import ssl
 import subprocess
@@ -11,7 +13,10 @@ import pytest
 
 from scripts.yealink_fleet import (
     PageParser,
+    PinnedHTTPSConnection,
+    SamePhoneRedirects,
     YealinkClient,
+    YealinkError,
     aes_encrypt_password,
     certificate_fingerprint,
     contexts_for,
@@ -20,6 +25,31 @@ from scripts.yealink_fleet import (
     redact_context,
     rsa_encrypt_text,
 )
+
+
+def test_changed_certificate_rejected_on_actual_connection(monkeypatch):
+    peer = MagicMock()
+    peer.getpeercert.return_value = b"attacker certificate"
+    def connect(connection):
+        connection.sock = peer
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", connect)
+    connection = PinnedHTTPSConnection("phone.example", fingerprint="AB" * 32)
+    with pytest.raises(YealinkError, match="authenticated connection"):
+        connection.connect()
+    peer.close.assert_called_once()
+    good = PinnedHTTPSConnection("phone.example", fingerprint=hashlib.sha256(b"attacker certificate").hexdigest().upper())
+    good.connect()
+    assert good.sock is peer
+
+
+@pytest.mark.parametrize("url", ["http://phone.example/path", "https://elsewhere/path",
+                               "https://phone.example:444/path", "https://user@phone.example/path"])
+def test_redirects_cannot_escape_pinned_origin(url):
+    client = YealinkClient("phone.example", "AB" * 32, "test", "test")
+    with pytest.raises(YealinkError):
+        client._same_phone_url(url)
+    with pytest.raises(YealinkError):
+        SamePhoneRedirects(client._same_phone_url).redirect_request(None, None, 302, "", {}, url)
 
 
 def test_fingerprint_probe_requires_modern_tls(monkeypatch: pytest.MonkeyPatch) -> None:

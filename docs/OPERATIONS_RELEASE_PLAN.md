@@ -39,3 +39,17 @@ Playwright is test-only and is not a Raspberry Pi runtime dependency.
 
 Hardware/provider acceptance and school leadership's emergency policy require witnessed site
 work. Code and simulated tests must never be reported as evidence of audible site coverage.
+
+## Receiver acceptance contract
+
+Receiver checks are append-only and identify one receiver and zone, firmware, provisioning
+owner, call policy, witness and emergency path. Playback, incoming call, outgoing call,
+reprovision/reboot, and emergency results remain separate. Only speakers may mark telephone
+checks not applicable. Failed or untested checks never count as current passing evidence.
+
+Evidence becomes due for recheck after 90 days or a change to the zone/destination/interface/
+codec/calibration contract. Display-name and schedule edits do not invalidate it. Firmware and
+provisioning changes outside this appliance cannot be detected automatically: record a new
+check after each such change. The history keeps superseded records, while zone cards show
+only each named receiver's latest evidence. Legacy audible checks are explicitly incomplete.
+A recorded success is a human attestation for that receiver, never proof of fleet coverage.

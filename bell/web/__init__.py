@@ -39,6 +39,7 @@ from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 from starlette.middleware.sessions import SessionMiddleware
 
 from bell import __version__
+from bell.acceptance import AcceptanceStore, ReceiverEvidence, zone_fingerprint
 from bell.alerts import AlertDispatcher
 from bell.audio import AudioProcessingError, AudioToolMissing, codec_spec, prep, probe_audio
 from bell.auth import AuthError, AuthStore
@@ -170,6 +171,7 @@ def create_app(
     app.state.config_dir = directory
     app.state.scheduler = scheduler
     manual_actions = ManualActions(load_config(directory).state_path / "manual-actions.sqlite3")
+    acceptance = AcceptanceStore(load_config(directory).state_path / "receiver-acceptance.sqlite3")
     rate_limiter = RateLimiter(load_config(directory).settings.api_rate_limit_per_minute)
     login_limiter = RateLimiter(5, 300.0)
     capture_limiter = RateLimiter(6, 300.0)
@@ -2511,9 +2513,33 @@ def create_app(
             config=cfg,
             health=health,
             confirmations=confirmations,
+            receiver_records=acceptance.history(cfg, datetime.now(ZoneInfo(cfg.settings.timezone))),
+            receiver_fingerprints={zone.name: zone_fingerprint(cfg, zone.name) for zone in cfg.zones},
             default_sound=default_sound,
             message=message,
         )
+
+    @app.post("/commissioning/record")
+    async def commissioning_record(request: Request) -> RedirectResponse:
+        require_auth(request)
+        form = await request.form()
+        verify_csrf(request, str(form.get("csrf", "")))
+        zone = str(form.get("zone", ""))
+        try:
+            evidence = ReceiverEvidence.model_validate({
+                key: str(form[key]) for key in ReceiverEvidence.model_fields if key in form
+            })
+        except ValidationError as exc:
+            raise HTTPException(400, "Complete receiver identity, ownership and applicable test results") from exc
+        with config_lock:
+            cfg = config()
+            if zone not in cfg.zone_map:
+                raise HTTPException(400, "Choose a configured zone")
+            fingerprint = zone_fingerprint(cfg, zone)
+            if fingerprint != form.get("receiver_fingerprint"):
+                raise HTTPException(409, "Receiver configuration changed; repeat the checks before recording")
+            acceptance.record(zone, fingerprint, evidence, datetime.now(ZoneInfo(cfg.settings.timezone)))
+        return RedirectResponse("/commissioning?message=Receiver+evidence+recorded", status_code=303)
 
     @app.post("/commissioning/confirm")
     def commissioning_confirm(

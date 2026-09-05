@@ -7,7 +7,9 @@ import argparse
 import base64
 import getpass
 import hashlib
+import hmac
 import html
+import http.client
 import json
 import re
 import secrets
@@ -16,12 +18,22 @@ import socket
 import ssl
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from functools import partial
 from html.parser import HTMLParser
 from http.cookiejar import CookieJar
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode, urljoin, urlsplit
-from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
+from urllib.request import (
+    HTTPCookieProcessor,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 LOGIN_FORM_PATH = "/servlet?m=mod_listener&p=login&q=loginForm&jumpto=status"
 LOGIN_POST_PATH = "/servlet?m=mod_listener&p=login&q=login"
@@ -232,6 +244,45 @@ class PageParser(HTMLParser):
             self._res_info_parts.append(data)
 
 
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Verify identity on the actual connection before HTTP headers or credentials leave."""
+
+    def __init__(self, host: str, *, fingerprint: str, **kwargs: Any) -> None:
+        self.fingerprint = fingerprint
+        super().__init__(host, **kwargs)
+
+    def connect(self) -> None:
+        super().connect()
+        if self.sock is None:
+            raise YealinkError("TLS connection did not produce a socket")
+        actual = hashlib.sha256(self.sock.getpeercert(binary_form=True)).hexdigest().upper()
+        if not hmac.compare_digest(actual, self.fingerprint):
+            self.close()
+            raise YealinkError("certificate fingerprint mismatch on authenticated connection")
+
+
+class PinnedHTTPSHandler(HTTPSHandler):
+    def __init__(self, fingerprint: str, context: ssl.SSLContext) -> None:
+        super().__init__(context=context)
+        self.fingerprint = fingerprint
+
+    def https_open(self, request: Request) -> http.client.HTTPResponse:
+        return self.do_open(
+            partial(PinnedHTTPSConnection, fingerprint=self.fingerprint),
+            request, context=self._context,
+        )
+
+
+class SamePhoneRedirects(HTTPRedirectHandler):
+    def __init__(self, validate: Callable[[str], str]) -> None:
+        self.validate = validate
+
+    def redirect_request(self, req: Request, fp: Any, code: int, msg: str,
+                         headers: Any, newurl: str) -> Request | None:
+        self.validate(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class YealinkClient:
     def __init__(
         self,
@@ -254,8 +305,10 @@ class YealinkClient:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         self.opener = build_opener(
+            ProxyHandler({}),
             HTTPCookieProcessor(self.cookies),
-            HTTPSHandler(context=context),
+            PinnedHTTPSHandler(self.fingerprint, context),
+            SamePhoneRedirects(self._same_phone_url),
         )
         self.headers = {
             "User-Agent": (
@@ -275,7 +328,9 @@ class YealinkClient:
 
     def _same_phone_url(self, url: str) -> str:
         absolute = urljoin(self.base_url, url)
-        if urlsplit(absolute).hostname != self.host:
+        parsed = urlsplit(absolute)
+        if (parsed.scheme != "https" or parsed.hostname != self.host
+                or parsed.port not in (None, 443) or parsed.username or parsed.password):
             raise YealinkError(f"refusing to contact an external asset host: {absolute}")
         return absolute
 
