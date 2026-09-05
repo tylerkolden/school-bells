@@ -278,6 +278,7 @@ if (builder) {
     const maximum = Number(timeInput.max.slice(0, 2)) * 60 + Number(timeInput.max.slice(3));
     nextMinutes = Math.min(nextMinutes, maximum);
     timeInput.value = `${String(Math.floor(nextMinutes / 60)).padStart(2, "0")}:${String(nextMinutes % 60).padStart(2, "0")}`;
+    newRow.querySelector(".event-fields").open = true;
     list.append(fragment);
     dirty = true;
     refresh();
@@ -410,4 +411,21 @@ document.querySelectorAll('form[action="/manual/fire"]').forEach(form => {
   form.addEventListener("submit", () => {
     form.querySelectorAll("button").forEach(button => { button.disabled = true; });
   });
+});
+
+const manualPreview = document.querySelector("[data-manual-preview]");
+if (manualPreview) {
+  const sound = document.querySelector("#sound");
+  const update = () => { manualPreview.src = `/sounds/${encodeURIComponent(sound.value)}`; manualPreview.load(); };
+  sound.addEventListener("change", update);
+  update();
+}
+document.querySelectorAll(".builder-form").forEach(form => {
+  form.addEventListener("invalid", event => {
+    let parent = event.target.parentElement;
+    while (parent) { if (parent.tagName === "DETAILS") parent.open = true; parent = parent.parentElement; }
+  }, true);
+});
+document.querySelectorAll(".more-menu").forEach(menu => {
+  menu.addEventListener("keydown", event => { if (event.key === "Escape") { menu.open = false; menu.querySelector("summary").focus(); } });
 });
