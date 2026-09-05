@@ -28,9 +28,12 @@ class PlannedEvent:
     event: BellEvent
     source: str
     scheduled_at: datetime
+    action_id: str | None = None
 
     @property
     def key(self) -> str:
+        if self.action_id:
+            return f"manual:{self.action_id}"
         return f"{self.scheduled_at:%Y-%m-%d}|{self.event.time:%H:%M}|{self.event.label}|{self.event.zone}"
 
 
@@ -374,7 +377,11 @@ class BellScheduler:
         now: datetime | None = None,
         manual: bool = False,
         override_hours: bool = False,
+        expected_config_hash: str | None = None,
     ) -> SafetyDecision:
+        config = self.config
+        if expected_config_hash is not None and config.hash != expected_config_hash:
+            return SafetyDecision(False, "Configuration changed; review a new page")
         current = now or datetime.now(self.timezone)
         if not manual and current - planned.scheduled_at > timedelta(seconds=60):
             reason = "event is more than 60 seconds late; skipped"
@@ -383,10 +390,10 @@ class BellScheduler:
             return SafetyDecision(False, reason)
         if self.state.has_attempt(current.date(), planned.key):
             return SafetyDecision(False, "event already attempted today")
-        sound = self.config.sounds_path / planned.event.sound
+        sound = config.sounds_path / planned.event.sound
         decision = evaluate_fire(
             current,
-            self.config.safety,
+            config.safety,
             sound,
             self.state.attempt_count(current.date()),
             manual=manual,
@@ -404,7 +411,7 @@ class BellScheduler:
         ):
             return SafetyDecision(False, "event already attempted today")
         try:
-            self.transmit(planned.event, self.config, planned.source)
+            self.transmit(planned.event, config, planned.source)
         except Exception as exc:
             self.state.update_result(current.date(), planned.key, "failed", str(exc))
             LOGGER.exception("bell_transmit_failed", extra={"event": planned.key})

@@ -63,6 +63,7 @@ from bell.config import (
     Zone,
     load_config,
 )
+from bell.manual import ManualActions, sound_digest
 from bell.probe import capture as capture_rtp
 from bell.probe import load_capture, save_capture
 from bell.recovery import (
@@ -71,7 +72,7 @@ from bell.recovery import (
     create_support_bundle,
     restore_portable_backup,
 )
-from bell.safety import evaluate_fire, within_allowed_hours
+from bell.safety import check_kill_switch, evaluate_fire, within_allowed_hours
 from bell.scheduler import BellScheduler, PlannedEvent, resolve_day, upcoming_events
 from bell.update import UpdateRequestError, load_update_status, queue_update_request
 
@@ -168,6 +169,7 @@ def create_app(
     )
     app.state.config_dir = directory
     app.state.scheduler = scheduler
+    manual_actions = ManualActions(load_config(directory).state_path / "manual-actions.sqlite3")
     rate_limiter = RateLimiter(load_config(directory).settings.api_rate_limit_per_minute)
     login_limiter = RateLimiter(5, 300.0)
     capture_limiter = RateLimiter(6, 300.0)
@@ -329,8 +331,8 @@ def create_app(
             health_provider()
             if health_provider
             else {
-                "ready": True,
-                "readiness_reasons": [],
+                "ready": False,
+                "readiness_reasons": ["Runtime health unavailable"],
                 "last_fire": None,
                 "active_page": None,
             }
@@ -354,11 +356,12 @@ def create_app(
             for item in upcoming
         ]
         blocked_reasons: list[str] = []
-        if current.safety.kill_switch_enabled:
+        kill_active = not check_kill_switch(now.date(), current.safety).allowed
+        if kill_active:
             blocked_reasons.append("kill switch enabled")
         if pause_active:
             blocked_reasons.append(f"paused: {current.safety.pause_reason}")
-        if not health.get("ready", True):
+        if not health.get("ready", False):
             blocked_reasons.extend(str(item) for item in health.get("readiness_reasons", []))
         return {
             "server_time": now.isoformat(),
@@ -370,11 +373,11 @@ def create_app(
             "today_event_count": len(plan.events),
             "next_bell": events[0] if events else None,
             "upcoming": events,
-            "ready": bool(health.get("ready", True)) and not blocked_reasons,
+            "ready": bool(health.get("ready", False)) and not blocked_reasons,
             "blocked_reasons": blocked_reasons,
             "last_fire": health.get("last_fire"),
             "active_page": health.get("active_page"),
-            "kill_switch": current.safety.kill_switch_enabled,
+            "kill_switch": kill_active,
             "pause": {
                 "active": pause_active,
                 "until": current.safety.pause_until.isoformat()
@@ -647,7 +650,7 @@ def create_app(
             "scheduler",
             normalized_reason or "temporary pause cleared",
         )
-        message = "Scheduled bells resumed." if pause_until is None else "Scheduled bells paused."
+        message = "Bell transmission resumed." if pause_until is None else "Bell transmission paused."
         return RedirectResponse(f"/?{urlencode({'message': message})}", status_code=303)
 
     @app.get("/calendar", response_class=HTMLResponse)
@@ -2387,7 +2390,13 @@ def create_app(
             path.name for path in cfg.sounds_path.iterdir()
         }:
             raise HTTPException(400, "Choose a valid sound and zone")
-        payload = {"sound": sound, "zone": zone, "override_hours": override_hours}
+        try:
+            digest = sound_digest(cfg.sounds_path / sound)
+        except OSError as exc:
+            raise HTTPException(400, "Sound is unavailable; choose another sound") from exc
+        payload = {"sound": sound, "zone": zone, "override_hours": override_hours,
+                   "action_id": secrets.token_hex(24), "config_hash": cfg.hash,
+                   "sound_digest": digest}
         token = signer.dumps(payload)
         return render(
             request,
@@ -2412,7 +2421,28 @@ def create_app(
             raise HTTPException(
                 400, "Confirmation expired or is invalid. Please start again."
             ) from exc
-        cfg = config()
+        if not isinstance(payload, dict) or not all(
+            key in payload for key in ("action_id", "config_hash", "sound_digest", "sound", "zone")
+        ):
+            raise HTTPException(400, "Confirmation predates this release; review the page again")
+        now = datetime.now(ZoneInfo(config().settings.timezone))
+        if not manual_actions.claim(payload["action_id"], now):
+            return RedirectResponse(
+                f"/manual?{urlencode({'message': manual_actions.result(payload['action_id'])})}",
+                status_code=303,
+            )
+        with config_lock:
+            cfg = config()
+            try:
+                unchanged = (cfg.hash == payload["config_hash"]
+                             and payload["zone"] in cfg.zone_map
+                             and sound_digest(cfg.sounds_path / payload["sound"]) == payload["sound_digest"])
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                reason = "Configuration or audio changed. Review a new page before sending."
+                manual_actions.finish(payload["action_id"], reason)
+                return RedirectResponse(f"/manual?{urlencode({'message': reason})}", status_code=303)
         now = datetime.now(ZoneInfo(cfg.settings.timezone))
         sound = cfg.sounds_path / payload["sound"]
         count = scheduler.state.attempt_count(now.date()) if scheduler else 0
@@ -2434,7 +2464,8 @@ def create_app(
                     "reason": decision.reason,
                 },
             )
-            return RedirectResponse(f"/manual?message={decision.reason}", status_code=303)
+            manual_actions.finish(payload["action_id"], decision.reason)
+            return RedirectResponse(f"/manual?{urlencode({'message': decision.reason})}", status_code=303)
         if scheduler is None:
             result_reason = "validated (test mode; no scheduler attached)"
         else:
@@ -2447,14 +2478,16 @@ def create_app(
                 zone=payload["zone"],
                 label="Manual office trigger",
             )
-            planned = PlannedEvent(event, "Manual", now)
+            planned = PlannedEvent(event, "Manual", now, action_id=payload["action_id"])
             decision = scheduler.fire(
                 planned,
                 now=now,
                 manual=True,
                 override_hours=bool(payload.get("override_hours")),
+                expected_config_hash=payload["config_hash"],
             )
             result_reason = decision.reason
+        manual_actions.finish(payload["action_id"], result_reason)
         LOGGER.info(
             "ui_action",
             extra={"action": "manual_fire", "target": payload, "result": result_reason},

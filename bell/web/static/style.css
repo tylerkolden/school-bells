@@ -88,3 +88,5 @@ input[type=file]{min-width:0;max-width:100%;overflow:hidden}
   .app-header nav{grid-template-columns:repeat(2,minmax(0,1fr))}
   .app-header nav a,.nav-button{text-align:left}
 }
+
+[hidden]{display:none!important}
