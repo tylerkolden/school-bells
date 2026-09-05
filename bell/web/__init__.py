@@ -396,6 +396,9 @@ def create_app(
 
     def api_scope(request: Request) -> str:
         supplied = request.headers.get("X-Bell-API-Key", "")
+        monitor = os.environ.get("BELL_MONITOR_API_KEY", "")
+        if monitor and secrets.compare_digest(supplied, monitor):
+            raise HTTPException(status_code=401, detail="Monitoring credentials may only read health")
         normal = os.environ.get("BELL_API_KEY", "")
         emergency = os.environ.get("BELL_EMERGENCY_API_KEY", "")
         if emergency and secrets.compare_digest(supplied, emergency):

@@ -151,6 +151,11 @@ def test_monitor_key_cannot_transmit(config_tree, monkeypatch):
     assert health.status_code == 200 and health.json()["ready"] is False
     assert client.get("/api/v1/today", headers=headers).status_code == 401
     assert client.post("/api/v1/trigger", headers=headers, json={"zone": "indoors", "sound": "class-bell.wav"}).status_code == 401
+    # A misconfigured shared value must still fail closed, even if it matches a write key.
+    monkeypatch.setenv("BELL_API_KEY", "read-only-test")
+    monkeypatch.setenv("BELL_EMERGENCY_API_KEY", "read-only-test")
+    assert client.post("/api/v1/trigger", headers=headers, json={"zone": "indoors", "sound": "class-bell.wav"}).status_code == 401
+
 
 
 def plan(**changes):
