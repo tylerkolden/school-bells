@@ -26,6 +26,7 @@ def test_live_transitions_and_stale_connection(page, console):
     expect(page.locator("[data-active-page]")).to_be_hidden(timeout=6000)
     expect(page.locator("[data-resume-form]")).to_be_hidden()
     expect(page.locator("[data-config-changed]")).to_be_visible()
+    page.locator(".pause-disclosure > summary").click()
     expect(page.get_by_role("button", name="Pause bells", exact=True)).to_be_disabled()
 
 
