@@ -1,5 +1,10 @@
 # Yealink fleet inspection
 
+For calls placed on hold by bells, follow [the call-interruption runbook](CALL_INTERRUPTION.md).
+It includes a provider provisioning override and `scripts/check_yealink_barge.py` for auditing
+a local text CFG export. Web inspection and file audits require witnessed call tests before
+they can establish that the deployed receiver policy works.
+
 `scripts/yealink_fleet.py` is a standalone, read-only diagnostic for Yealink web
 configuration. It implements the phone's encrypted web login so an operator can inspect phones
 from a Raspberry Pi on the voice network without changing their settings.

@@ -281,6 +281,11 @@ Provision these settings through the authoritative phone configuration when poss
 phone providers commonly reprovision overnight and wipe changes made in the local web UI.
 After any reprovisioning, run the acceptance test and verify paging subscriptions again.
 
+For office phones, explicitly provision and test the active-call paging policy. See
+[bells interrupting calls](docs/CALL_INTERRUPTION.md) for the no-barge provisioning fragment,
+root-cause analysis, emergency-coverage requirements, and idle/busy-phone acceptance matrix.
+The Pi's `busy_policy` concerns competing transmissions, not desk-phone call state.
+
 ## Production
 
 Review [operations](docs/OPERATIONS.md), deploy to a fresh 64-bit Raspberry Pi OS host with one
