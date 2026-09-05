@@ -1,0 +1,17 @@
+[Unit]
+Description=Independent School Bell outage monitor (install on a separate host)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+StateDirectory=bell-watch
+EnvironmentFile=/etc/bell-watch.env
+ExecStart=/opt/bell-watch/.venv/bin/python -m bell.watchdog --config /etc/bell-watch.json --state-dir /var/lib/bell-watch
+TimeoutStartSec=25
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077

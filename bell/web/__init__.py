@@ -64,9 +64,11 @@ from bell.config import (
     Zone,
     load_config,
 )
+from bell.continuity import ContinuityPlan, ContinuityStore
 from bell.manual import ManualActions, sound_digest
 from bell.probe import capture as capture_rtp
 from bell.probe import load_capture, save_capture
+from bell.readiness import range_config, review
 from bell.recovery import (
     RecoveryError,
     create_portable_backup,
@@ -161,6 +163,7 @@ def create_app(
             receiver_dashboard_url = ""
     signer = URLSafeTimedSerializer(secret, salt="bell-manual-confirm")
     update_signer = URLSafeTimedSerializer(secret, salt="bell-update-confirm")
+    calendar_signer = URLSafeTimedSerializer(secret, salt="bell-calendar-review")
     app = FastAPI(title="School Bell Office", docs_url=None, redoc_url=None)
     assets = Path(__file__).parent
     app.mount("/static", StaticFiles(directory=assets / "static"), name="static")
@@ -171,6 +174,7 @@ def create_app(
     app.state.config_dir = directory
     app.state.scheduler = scheduler
     manual_actions = ManualActions(load_config(directory).state_path / "manual-actions.sqlite3")
+    continuity = ContinuityStore(load_config(directory).state_path / "continuity.sqlite3")
     acceptance = AcceptanceStore(load_config(directory).state_path / "receiver-acceptance.sqlite3")
     rate_limiter = RateLimiter(load_config(directory).settings.api_rate_limit_per_minute)
     login_limiter = RateLimiter(5, 300.0)
@@ -854,20 +858,32 @@ def create_app(
         schedule_name: str = Form(default=""),
         no_bell_reason: str = Form(default=""),
         config_hash: str = Form(default=""),
+        review_token: str = Form(default=""),
         csrf: str = Form(),
-    ) -> RedirectResponse:
+    ) -> Response:
         require_auth(request)
         verify_csrf(request, csrf)
-        cfg = config()
-        if end < start or (end - start).days > 370:
-            raise HTTPException(400, "Date range must be ordered and no longer than 371 days")
-        if bulk_action not in {"schedule", "no_bells", "default"}:
-            raise HTTPException(400, "Choose a valid bulk calendar action")
-        if bulk_action == "schedule" and schedule_name not in cfg.schedule_map:
-            raise HTTPException(400, "Choose a valid schedule")
-        reason = no_bell_reason.strip()
-        if bulk_action == "no_bells" and not reason:
-            raise HTTPException(400, "Enter a reason for the no-bell range")
+        with config_lock:
+            cfg = config()
+            if cfg.hash != config_hash:
+                raise HTTPException(409, "Configuration changed; reload and review the range again")
+            reason = no_bell_reason.strip()
+            try:
+                proposed = range_config(cfg, start, end, bulk_action, schedule_name, reason)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            payload = {"start": start.isoformat(), "end": end.isoformat(), "bulk_action": bulk_action,
+                       "schedule_name": schedule_name, "no_bell_reason": reason, "config_hash": config_hash}
+            if not review_token:
+                return render(request, "calendar_review.html", fields=payload,
+                              rows=list(zip(review(cfg, start, end), review(proposed, start, end), strict=True)),
+                              review_token=calendar_signer.dumps(payload))
+            try:
+                reviewed = calendar_signer.loads(review_token, max_age=600)
+            except BadSignature as exc:
+                raise HTTPException(400, "Calendar review expired or is invalid; preview again") from exc
+            if reviewed != payload:
+                raise HTTPException(409, "Calendar changes differ from the reviewed range; preview again")
 
         def mutate(document: Any, _current: BellConfig) -> None:
             calendar = document["calendar"]
@@ -887,6 +903,20 @@ def create_app(
         record_audit("calendar_bulk_change", f"{start} through {end}", bulk_action)
         query = urlencode({"selected": start.isoformat(), "month": start.strftime("%Y-%m")})
         return RedirectResponse(f"/calendar?{query}", status_code=303)
+
+    @app.get("/calendar/readiness", response_class=HTMLResponse)
+    def calendar_readiness(request: Request, start: date | None = None,
+                           end: date | None = None) -> HTMLResponse:
+        require_auth(request)
+        cfg = config()
+        start = start or datetime.now(ZoneInfo(cfg.settings.timezone)).date()
+        try:
+            end = end or start + timedelta(days=365)
+            rows = review(cfg, start, end)
+        except (ValueError, OverflowError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return render(request, "readiness.html", start=start, end=end, rows=rows,
+                      issues=[row for row in rows if row["issue"]])
 
     @app.get("/calendar/export.csv")
     def calendar_export(request: Request, year: int | None = None) -> Response:
@@ -2134,7 +2164,8 @@ def create_app(
     def alert_test(request: Request, csrf: str = Form()) -> RedirectResponse:
         require_auth(request)
         verify_csrf(request, csrf)
-        outcome = AlertDispatcher(config().settings).send(
+        cfg = config()
+        outcome = AlertDispatcher(cfg.settings, outbox_path=cfg.state_path / "alerts.sqlite3").send(
             "operator_test",
             "School Bell test alert",
             severity="info",
@@ -2669,8 +2700,27 @@ def create_app(
             config=cfg,
             config_hash=cfg.hash,
             backups=backups,
+            continuity=continuity.snapshot(datetime.now(ZoneInfo(cfg.settings.timezone)).date()),
             message=message,
         )
+
+    @app.post("/recovery/ownership")
+    async def continuity_save(request: Request) -> RedirectResponse:
+        require_auth(request)
+        form = await request.form()
+        verify_csrf(request, str(form.get("csrf", "")))
+        try:
+            values = {key: str(form[key]) for key in ContinuityPlan.model_fields if key in form}
+            for key in ("last_restore", "last_offdevice_copy"):
+                if not values.get(key):
+                    values[key] = None
+            plan = ContinuityPlan.model_validate(values)
+            continuity.record(plan, datetime.now(ZoneInfo(config().settings.timezone)),
+                              int(str(form.get("revision", "-1"))))
+        except (ValueError, ValidationError) as exc:
+            raise HTTPException(400, "Complete valid ownership, dates and witnessed results; reload if edited elsewhere") from exc
+        record_audit("continuity_record", plan.owner, plan.restore_result)
+        return RedirectResponse("/recovery?message=Continuity+record+saved", status_code=303)
 
     @app.post("/recovery/export")
     def recovery_export(request: Request, csrf: str = Form()) -> FileResponse:
@@ -2884,13 +2934,18 @@ def create_app(
 
     @app.get("/api/v1/health")
     def api_health(request: Request) -> dict[str, Any]:
-        api_scope(request)
+        monitor_key = os.environ.get("BELL_MONITOR_API_KEY", "")
+        supplied = request.headers.get("X-Bell-API-Key", "")
+        if not monitor_key or not secrets.compare_digest(supplied, monitor_key):
+            api_scope(request)
         cfg = config()
         return (
             health_provider()
             if health_provider
             else {
-                "status": "ok",
+                "status": "unknown",
+                "ready": False,
+                "readiness_reasons": ["Runtime health unavailable"],
                 "config_valid": True,
                 "config_hash": cfg.hash,
             }

@@ -83,7 +83,7 @@ def test_alert_dispatcher_signs_and_deduplicates(config_tree: Path, monkeypatch)
         captured.extend((request, timeout))
         return Response()
 
-    monkeypatch.setattr("bell.alerts.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("bell.alerts.open_webhook", fake_urlopen)
     dispatcher = AlertDispatcher(settings)
     outcome = dispatcher.send(
         "delivery_failed", "Everywhere page failed", details={"zone": "everywhere"}
