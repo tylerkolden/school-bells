@@ -8,7 +8,7 @@ from test_web import hidden, login
 
 from bell.config import load_config
 from bell.manual import ManualActions
-from bell.scheduler import BellScheduler
+from bell.scheduler import BellScheduler, FireState
 from bell.web import create_app
 
 
@@ -73,3 +73,13 @@ def test_unknown_runtime_is_not_ready(config_tree: Path) -> None:
     client = TestClient(create_app(config_tree, password="test"))
     login(client)
     assert client.get("/operations/snapshot").json()["ready"] is False
+
+
+def test_daily_cap_is_atomic_for_distinct_simultaneous_actions(tmp_path: Path) -> None:
+    now = datetime.now(ZoneInfo("America/Denver"))
+    states = [FireState(tmp_path / "fire.sqlite3") for _ in range(8)]
+    def claim(index):
+        return states[index].record_once(
+            now.date(), f"action-{index}", "started", "claimed", now, max_attempts=1)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        assert sum(executor.map(claim, range(8))) == 1

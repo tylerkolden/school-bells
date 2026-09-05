@@ -176,8 +176,17 @@ class FireState:
         detail: str,
         now: datetime,
         planned: PlannedEvent | None = None,
+        max_attempts: int | None = None,
     ) -> bool:
         with self._lock, self._connect() as connection:
+            # Serialize the cap check with the insert across processes/connections.
+            connection.execute("BEGIN IMMEDIATE")
+            if max_attempts is not None:
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM fire_attempts WHERE day=?", (day.isoformat(),)
+                ).fetchone()[0]
+                if count >= max_attempts:
+                    return False
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO fire_attempts
                 (day,event_key,attempted_at,result,detail,source,label,zone,sound,scheduled_at)
@@ -407,9 +416,10 @@ class BellScheduler:
             return decision
         # Claim the event before transmission so a concurrent/restarted executor cannot double-fire.
         if not self.state.record_once(
-            current.date(), planned.key, "started", "transmission claimed", current, planned
+            current.date(), planned.key, "started", "transmission claimed", current, planned,
+            max_attempts=config.safety.max_events_per_day,
         ):
-            return SafetyDecision(False, "event already attempted today")
+            return SafetyDecision(False, "event already attempted or daily cap reached")
         try:
             self.transmit(planned.event, config, planned.source)
         except Exception as exc:
