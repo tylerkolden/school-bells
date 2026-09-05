@@ -9,14 +9,23 @@
   <title>{% block title %}{{ display_brand.school_name }}{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', path='favicon.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}?v=0.8.1">
-  <script defer src="{{ url_for('static', path='app.js') }}?v=0.8.1"></script>
+  <link rel="stylesheet" href="{{ url_for('static', path='operations.css') }}?v=0.9">
+  <script defer src="{{ url_for('static', path='app.js') }}?v=0.9"></script>
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to main content</a>
 {% if authenticated %}
 <header class="app-header">
   <a class="brand" href="/" aria-label="{{ display_brand.school_name }} home">{% if display_brand.has_logo %}<img class="brand-logo" src="/branding/logo.png" alt="">{% else %}<span class="brand-mark" aria-hidden="true">B</span>{% endif %}<span><strong>{{ display_brand.school_name }}</strong><small>{{ display_brand.subtitle }}</small></span></a>
-  <nav aria-label="Primary navigation"><a href="/">Today</a><a href="/calendar">Calendar</a><a href="/schedules">Schedules</a>{% if display_user.role == 'admin' %}<a href="/setup">Setup</a>{% endif %}<a href="/manual">Ring now</a><a href="/status">System status</a>{% if display_user.role == 'admin' %}<a href="/recovery">Recovery</a><a href="/updates">Updates</a><a href="/account">Accounts</a>{% endif %}<form action="/logout" method="post"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="nav-button">Sign out · {{ display_user.username }}</button></form></nav>
+  {% macro nav_link(path, label) %}<a href="{{ path }}"{% if request.url.path == path %} aria-current="page"{% endif %}>{{ label }}</a>{% endmacro %}
+  <nav aria-label="Primary navigation">
+    {{ nav_link('/', 'Today') }}{{ nav_link('/calendar', 'Calendar') }}{{ nav_link('/manual', 'Ring now') }}
+    <details class="more-menu"><summary>More</summary><div class="more-links">
+      {{ nav_link('/schedules', 'Schedules') }}{{ nav_link('/status', 'System status') }}{{ nav_link('/history', 'History') }}{{ nav_link('/commissioning', 'Receiver checks') }}
+      {% if display_user.role == 'admin' %}{{ nav_link('/setup', 'Setup') }}{{ nav_link('/recovery', 'Recovery') }}{{ nav_link('/updates', 'Updates') }}{{ nav_link('/account', 'Accounts') }}{% endif %}
+      <form action="/logout" method="post"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="nav-button">Sign out · {{ display_user.username }}</button></form>
+    </div></details>
+  </nav>
 </header>
 {% endif %}
 <main id="main-content" class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>

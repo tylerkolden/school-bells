@@ -11,7 +11,7 @@ from a Raspberry Pi on the voice network without changing their settings.
 
 The inspector:
 
-- pins the phone's SHA-256 certificate fingerprint before authentication;
+- pins the phone's SHA-256 certificate fingerprint on every TLS connection before sending HTTP headers or credentials;
 - submits exactly one login request and does not retry rejected credentials;
 - reads the multicast configuration page and its same-phone JavaScript assets;
 - redacts passwords, session identifiers, and anti-CSRF tokens from its report; and
@@ -34,3 +34,5 @@ identity has been verified manually.
 This tool is intentionally inspection-only. Any future configuration writer must be a separate,
 explicit operation with before-state capture, dry-run output, a one-phone pilot, post-save
 verification, and rollback.
+
+Authenticated connections require TLS 1.2 or newer. The preliminary identity probe is only an early check; every actual request verifies its own connection. Ambient proxies are disabled. Redirects and assets must remain HTTPS on the same phone and port 443.

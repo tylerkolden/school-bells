@@ -14,7 +14,7 @@
 {% if message %}<div class="notice info" role="status"><strong>{{ message }}</strong></div>{% endif %}
 
 <div class="builder-shell" data-schedule-builder data-event-limit="{{ event_limit }}" data-emergency-threshold="{{ config.safety.emergency_priority_threshold }}">
-  <aside class="schedule-library card" aria-label="Schedule library">
+  <aside class="schedule-library card" aria-label="Schedule library"><details class="library-disclosure"><summary>Choose a schedule ({{ config.schedules|length }})</summary>
     <div class="builder-panel-heading">
       <div><span class="overline">Library</span><h2>Schedules</h2></div>
       <span class="count-badge">{{ config.schedules|length }}</span>
@@ -28,7 +28,7 @@
       <p class="empty-inline">No saved schedules yet.</p>
       {% endfor %}
     </nav>
-  </aside>
+  </details></aside>
 
   <section class="builder-workspace">
     <form action="/schedules/save" method="post" class="builder-form" data-builder-form>
@@ -65,7 +65,7 @@
           {% for event in schedule.events %}
           <fieldset class="event-editor" data-event-row>
             <legend><span data-row-number>Event {{ loop.index }}</span><span class="event-editor-summary" data-row-summary>{{ event.time.strftime('%H:%M') }} · {{ event.label }}</span></legend>
-            <div class="event-grid primary-fields">
+            <details class="event-fields"><summary>Edit time, sound and zone</summary><div class="event-grid primary-fields">
               <label>Time
                 <input type="time" name="event_time" value="{{ event.time.strftime('%H:%M') }}" min="{{ config.safety.allowed_hours_start.strftime('%H:%M') }}" max="{{ config.safety.allowed_hours_end.strftime('%H:%M') }}" step="60" required>
               </label>
@@ -113,7 +113,7 @@
             <div class="row-actions">
               <button type="button" class="text-button danger-text" data-remove-event>Remove</button>
             </div>
-          </fieldset>
+          </details></fieldset>
           {% endfor %}
         </div>
         <div class="empty-event-state" data-empty-events{% if schedule.events %} hidden{% endif %}>
@@ -179,7 +179,7 @@
 <template id="event-row-template">
   <fieldset class="event-editor" data-event-row>
     <legend><span data-row-number>New event</span><span class="event-editor-summary" data-row-summary></span></legend>
-    <div class="event-grid primary-fields">
+    <details class="event-fields"><summary>Edit time, sound and zone</summary><div class="event-grid primary-fields">
       <label>Time
         <input type="time" name="event_time" min="{{ config.safety.allowed_hours_start.strftime('%H:%M') }}" max="{{ config.safety.allowed_hours_end.strftime('%H:%M') }}" step="60" required>
       </label>
@@ -210,6 +210,6 @@
     <div class="row-actions">
       <button type="button" class="text-button danger-text" data-remove-event>Remove</button>
     </div>
-  </fieldset>
+  </details></fieldset>
 </template>
 {% endblock %}
