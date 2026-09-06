@@ -21,7 +21,7 @@ from ota_updater import (
 )
 
 GUARD = Path("/etc/systemd/system/bell-system.service.d/10-preservation.conf")
-PROBE = Path("/run/systemd/system/bell-system.service.d/90-upgrade-probe.conf")
+PROBE = Path("/run/bell-upgrade-probe")
 SERVICE = "bell-system.service"
 
 
@@ -66,7 +66,7 @@ def begin(app: Path, transaction: Path, python: Path, helper: Path) -> None:
     save(transaction, record)
     durable_text(app / ".upgrade-transaction", str(transaction))
     GUARD.parent.mkdir(parents=True, exist_ok=True)
-    durable_text(GUARD, f"[Unit]\nConditionPathExists=!{marker(app)}\n")
+    durable_text(GUARD, f'[Service]\nExecCondition=/bin/sh -c \"test ! -e {marker(app)} || test -e {PROBE}\"\n')
     durable_text(marker(app), str(transaction) + "\n")
     marker(app).chmod(0o644)
     _run(["/usr/bin/systemctl", "daemon-reload"], timeout=30)
@@ -80,7 +80,7 @@ def begin(app: Path, transaction: Path, python: Path, helper: Path) -> None:
 def allow_probe() -> None:
     # Runtime override disappears at reboot; the persistent guard remains fail-closed.
     PROBE.parent.mkdir(parents=True, exist_ok=True)
-    PROBE.write_text("[Unit]\nConditionPathExists=\n", encoding="utf-8")
+    PROBE.write_text("Maintenance probe only; removed at reboot\n", encoding="utf-8")
     _run(["/usr/bin/systemctl", "daemon-reload"], timeout=30)
 
 

@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sqlite3
+from collections import Counter
 from contextlib import closing
 from pathlib import Path
 
@@ -147,11 +148,52 @@ def verified_checkpoint(app: Path, destination: Path) -> dict:
     return record
 
 
+def _sql_name(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def verify_database(before: Path, after: Path) -> None:
+    try:
+        with closing(sqlite3.connect(before.as_uri() + "?mode=ro", uri=True)) as original, closing(sqlite3.connect(after.as_uri() + "?mode=ro", uri=True)) as candidate:
+            for (table,) in original.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+                name = _sql_name(table)
+                columns = [row[1] for row in original.execute(f"PRAGMA table_info({name})")]
+                selected = ",".join(_sql_name(column) for column in columns)
+                old_rows = Counter(original.execute(f"SELECT {selected} FROM {name}"))
+                new_rows = Counter(candidate.execute(f"SELECT {selected} FROM {name}"))
+                if old_rows - new_rows:
+                    raise PreservationError("Candidate removed or changed existing SQLite data")
+    except sqlite3.DatabaseError as exc:
+        raise PreservationError("Candidate SQLite schema is not backward compatible") from exc
+
+
 def verify_site(app: Path, destination: Path) -> None:
     record = verified_checkpoint(app, destination)
     for name in ("config", "sounds"):
         if inventory(Path(record["roots"][name])) != record["files"][name]:
             raise PreservationError("Upgrade changed site configuration or custom uploads")
+    for name, entries in record.get("metadata", {}).items():
+        root = Path(record["roots"][name])
+        for relative, attributes in entries.items():
+            path = root / relative
+            if not path.exists():
+                raise PreservationError("Candidate removed an existing site-data path")
+            stat = path.stat()
+            if stat.st_mode & 0o777 != attributes["mode"] or (os.name == "posix" and
+                    (stat.st_uid != attributes["uid"] or stat.st_gid != attributes["gid"])):
+                raise PreservationError("Candidate changed site-data permissions or ownership")
+    state = Path(record["roots"]["state"])
+    current_files = inventory(state)
+    for relative, digest in record["files"]["state"].items():
+        if relative not in current_files:
+            raise PreservationError("Candidate removed existing site state")
+        original, candidate = destination / "state" / relative, state / relative
+        with original.open("rb") as handle:
+            sqlite_file = handle.read(16) == b"SQLite format 3\x00"
+        if sqlite_file:
+            verify_database(original, candidate)
+        elif current_files[relative] != digest:
+            raise PreservationError("Candidate changed existing site state")
 
 
 def rollback(app: Path, destination: Path) -> None:

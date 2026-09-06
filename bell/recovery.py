@@ -80,6 +80,7 @@ def create_portable_backup(config: BellConfig, output_dir: Path, *, now: datetim
                 if source.is_symlink():
                     raise RecoveryError("Configuration links cannot be exported")
                 shutil.copy2(source, stage / "config" / name)
+            ca_paths = {}
             for destination in config.destinations:
                 if destination.tls_ca_file:
                     try:
@@ -91,6 +92,17 @@ def create_portable_backup(config: BellConfig, output_dir: Path, *, now: datetim
                     target = stage / "config" / relative
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(destination.tls_ca_file, target)
+                    ca_paths[destination.name] = relative.as_posix()
+            if ca_paths:
+                yaml = YAML()
+                yaml.preserve_quotes = True
+                path = stage / "config/destinations.yaml"
+                document = yaml.load(path.read_text(encoding="utf-8"))
+                for entry in document.get("destinations", []):
+                    if entry["name"] in ca_paths:
+                        entry["tls_ca_file"] = ca_paths[entry["name"]]
+                with path.open("w", encoding="utf-8") as handle:
+                    yaml.dump(document, handle)
             for sound in _regular_files(config.sounds_path):
                 target = stage / "sounds" / sound.relative_to(config.sounds_path)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +132,7 @@ def create_portable_backup(config: BellConfig, output_dir: Path, *, now: datetim
     return archive
 
 
-def _allowed_member(name: str) -> bool:
+def _allowed_member(name: str, *, directory: bool = False) -> bool:
     path = PurePosixPath(name)
     if (not name or "\\" in name or ":" in name or path.is_absolute()
             or any(part in {"", ".", ".."} for part in name.split("/"))
@@ -132,7 +144,9 @@ def _allowed_member(name: str) -> bool:
     if name == "manifest.json" or name in {"config", "sounds", "state", "state/branding"}:
         return True
     if path.parts[0] == "config":
-        return name in {f"config/{item}" for item in CONFIG_FILES} or path.suffix.lower() in {".pem", ".crt", ".cer"}
+        if "bell.env" in path.parts:
+            return False
+        return directory or name in {f"config/{item}" for item in CONFIG_FILES} or path.suffix.lower() in {".pem", ".crt", ".cer"}
     return path.parts[0] == "sounds" or name == "state/branding/logo.png"
 
 
@@ -150,7 +164,7 @@ def extract_and_validate_backup(archive: Path, destination: Path) -> BellConfig:
             expanded = 0
             seen: set[str] = set()
             for member in members:
-                if not _allowed_member(member.name):
+                if not _allowed_member(member.name, directory=member.isdir()):
                     raise RecoveryError(f"Backup contains an unexpected path: {member.name}")
                 canonical = member.name.casefold()
                 if canonical in seen:
@@ -226,6 +240,7 @@ def restore_portable_backup(archive: Path, app_dir: Path, backup_dir: Path, *,
         with settings_path.open("w", encoding="utf-8") as handle:
             yaml.dump(document, handle)
         pre_restore = create_portable_backup(current, backup_dir)
+        _regular_files(current.config_dir)
         shutil.copytree(current.config_dir, rollback / "config")
         shutil.copytree(current.sounds_path, rollback / "sounds")
         branding = current.state_path / "branding"

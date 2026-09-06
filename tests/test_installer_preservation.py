@@ -15,7 +15,7 @@ ROOT = Path(__file__).parents[1]
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='Actual Linux installer harness runs in CI')
-@pytest.mark.parametrize('failure', ['', 'validation', 'health'])
+@pytest.mark.parametrize('failure', ['', 'validation', 'health', 'locked'])
 def test_installer_preserves_existing_site_and_rolls_back(config_tree, tmp_path, failure):
     source = tmp_path / 'source'
     source.mkdir()
@@ -117,7 +117,12 @@ os.execv('/usr/bin/install',['/usr/bin/install',*args])
     env = {**os.environ, 'PATH': str(fake) + ':' + os.environ['PATH'], 'REAL_PYTHON': sys.executable,
            'PYTHONPATH': str(ROOT), 'HARNESS_ROOT': str(tmp_path), 'FAIL_POINT': failure,
            'BELL_RELEASE_VERSION': 'v0.9.0', 'BELL_RELEASE_COMMIT': 'f' * 40}
-    result = subprocess.run(['bash', str(source / 'deploy/install.sh')], env=env, capture_output=True, text=True, timeout=90)
+    import fcntl
+    updater.mkdir(exist_ok=True)
+    with (updater / 'install.lock').open('w') as held:
+        if failure == 'locked':
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(['bash', str(source / 'deploy/install.sh')], env=env, capture_output=True, text=True, timeout=90)
     assert result.returncode == (1 if failure else 0), result.stdout + result.stderr
     assert {name: inventory(shared / name) for name in before} == before
     assert not (app / '.upgrade-incomplete').exists()

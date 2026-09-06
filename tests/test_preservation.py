@@ -26,7 +26,7 @@ from bell.recovery import (
     restore_portable_backup,
 )
 from bell.safety import evaluate_fire
-from bell.upgrade import PreservationError, checkpoint, rollback, verify_site
+from bell.upgrade import PreservationError, checkpoint, inventory, rollback, verify_site
 from bell.web import create_app
 
 
@@ -208,7 +208,7 @@ def test_failed_activation_and_interrupted_recovery_restore_same_checkpoint(conf
         monkeypatch.setattr(tx, "_atomic_symlink", windows_test_link)
     transaction = tmp_path.parent / (tmp_path.name + '-transaction')
     tx.begin(app, transaction, Path(sys.executable), Path(__file__).parents[1] / 'bell/upgrade.py')
-    assert tx.marker(app).exists() and 'ConditionPathExists=!' in tx.GUARD.read_text()
+    assert tx.marker(app).exists() and 'ExecCondition=' in tx.GUARD.read_text()
     (app / 'sounds/custom.mp3').write_bytes(b'candidate corrupted audio')
     tx.MANAGED_PATHS[0].write_bytes(b'new service')
     with pytest.raises(PreservationError):
@@ -221,3 +221,49 @@ def test_failed_activation_and_interrupted_recovery_restore_same_checkpoint(conf
     assert not tx.marker(app).exists() and not tx.PROBE.exists()
     assert json.loads((transaction / 'transaction.json').read_text())['phase'] == 'rolled_back'
     assert any('stop' in command for command in actions)
+
+
+def test_candidate_cannot_silently_drop_state_but_additive_schema_is_allowed(config_tree, tmp_path):
+    cfg = load_config(config_tree)
+    cfg.state_path.mkdir(exist_ok=True)
+    database = cfg.state_path / 'custom.sqlite3'
+    with closing(sqlite3.connect(database)) as db:
+        db.execute('CREATE TABLE records (value TEXT)')
+        db.execute("INSERT INTO records VALUES ('keep')")
+        db.commit()
+    saved = tmp_path.parent / (tmp_path.name + '-checkpoint')
+    checkpoint(config_tree.parent, saved)
+    with closing(sqlite3.connect(database)) as db:
+        db.execute('ALTER TABLE records ADD COLUMN extra TEXT')
+        db.execute("INSERT INTO records VALUES ('new', 'extra')")
+        db.commit()
+    verify_site(config_tree.parent, saved)
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("DELETE FROM records WHERE value='keep'")
+        db.commit()
+    with pytest.raises(PreservationError, match='SQLite data'):
+        verify_site(config_tree.parent, saved)
+
+
+def test_corrupt_checkpoint_cannot_start_rollback(config_tree, tmp_path):
+    cfg = load_config(config_tree)
+    cfg.state_path.mkdir(exist_ok=True)
+    saved = tmp_path.parent / (tmp_path.name + '-checkpoint')
+    checkpoint(config_tree.parent, saved)
+    before = inventory(config_tree)
+    (saved / 'config/settings.yaml').write_text('corrupted')
+    with pytest.raises(PreservationError, match='checksum'):
+        rollback(config_tree.parent, saved)
+    assert inventory(config_tree) == before
+
+
+def test_interrupted_restore_leaves_transmission_guard(config_tree, tmp_path):
+    cfg = load_config(config_tree)
+    saved = create_portable_backup(cfg, tmp_path / 'backups')
+    def power_loss():
+        raise SystemExit('simulated process termination')
+    with pytest.raises(SystemExit):
+        restore_portable_backup(saved, config_tree.parent, tmp_path / 'restore-backups', reload_callback=power_loss)
+    assert (cfg.state_path / '.restore-incomplete').exists()
+    with pytest.raises(RecoveryError, match='interrupted restore'):
+        restore_portable_backup(saved, config_tree.parent, tmp_path / 'restore-backups')

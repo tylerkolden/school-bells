@@ -20,7 +20,7 @@ and a witnessed restore remain part of production readiness.
    the quiet window immediately before stopping; checkpoint before activation; compare config and
    uploads after staged validation and health checks. Restore prior data/code/service files on failure.
    A durable transaction record must block unattended restart after an interrupted activation until
-   rollback has completed. Do not replay bells to compensate for the maintenance interval.
+   rollback has completed. Do not add automatic resend behavior for the maintenance interval.
 4. Release gates: regression and adversarial tests must run on each supported Python version; Linux
    installer harness must test the actual shell control flow without touching a real system service.
 
@@ -67,11 +67,16 @@ concurrent installers. Synthetic tests never transmit audio or modify the deploy
   automatically pruned. Copy completed checkpoints off-device under the school's security policy.
 - Config/sound hashes must remain identical through validation and candidate health checks. The
   candidate blocks all transmissions (including manual overrides) and web mutations while the
-  root-owned `/opt/bell/.upgrade-incomplete` marker exists. A persistent systemd condition prevents
-  boot activation after a crash; only a runtime drop-in permits the maintenance health probe.
+  root-owned `/opt/bell/.upgrade-incomplete` marker exists. A persistent systemd ExecCondition prevents
+  boot activation after a crash; its own runtime token permits the maintenance health probe without
+  resetting any administrator-installed systemd conditions. Existing SQLite rows/columns and other
+  state files must remain intact; additive tables/columns/rows are permitted. Alert dispatch waits
+  until this verification completes.
 - Failure restores the checkpoint, former code symlink and root-managed service/updater files,
-  then checks readiness. Rollback failure keeps the guard and checkpoint for intervention. Late
-  bells are not replayed. Supported code-only upgrades use a versioned `current` symlink and distinct
+  then checks readiness. Rollback failure keeps the guard and checkpoint for intervention. Existing
+  event claims and the scheduler's 60-second misfire policy remain in force; no explicit replay is
+  added. Use the enforced quiet window, since startup of an older rollback release can still honor
+  a recent unclaimed scheduled event. Supported code-only upgrades use a versioned `current` symlink and distinct
   config/sounds/state roots within `/opt/bell`. External roots, overlapping roots, legacy layouts,
   links/special files or incompatible schemas require an explicit migration; no defaults replace them.
 
