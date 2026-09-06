@@ -98,3 +98,5 @@ Holidays, testing days and Mass days must be checked against the school's approv
 they are never guessed. Bulk changes first show every date's before/after events (including
 standing items and weekends). The final submission is bound to the signed ten-minute review
 and exact configuration. Changed inputs or configuration require another review.
+
+For upgrade checkpoints, custom upload preservation and crash recovery, see [Site-data preservation](SITE_DATA_PRESERVATION.md). Portable schema 2 now preserves all regular upload types, including MP3 and nested files.
