@@ -230,6 +230,8 @@ class ServiceRuntime:
         scheduler_running = self.scheduler.scheduler.running
         monitor_running = self.monitor.is_alive
         reasons: list[str] = []
+        if (self.config.state_path / ".restore-incomplete").exists():
+            reasons.append("Restore maintenance requires completion or recovery")
         if unhealthy:
             reasons.append("required endpoint unhealthy")
         if unknown_required:
@@ -477,6 +479,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 1
     configure_logging(config.log_path)
+    if (config.state_path / ".restore-incomplete").exists():
+        LOGGER.error("interrupted_restore_requires_recovery")
+        return 1
     errors = validate_startup(config)
     if errors:
         for error in errors:

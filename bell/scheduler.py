@@ -389,6 +389,8 @@ class BellScheduler:
         expected_config_hash: str | None = None,
     ) -> SafetyDecision:
         config = self.config
+        if (config.state_path / ".restore-incomplete").exists():
+            return SafetyDecision(False, "Restore maintenance; transmissions are blocked")
         if expected_config_hash is not None and config.hash != expected_config_hash:
             return SafetyDecision(False, "Configuration changed; review a new page")
         current = now or datetime.now(self.timezone)

@@ -277,6 +277,13 @@ def _write_json(path: Path, value: dict[str, Any], *, mode: int = 0o640) -> None
         except (ImportError, KeyError, PermissionError):
             pass
         os.replace(temporary, path)
+        if os.name == "posix":
+            for directory in (path.parent, path.parent.parent):
+                descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -375,7 +382,7 @@ def _safe_extract(archive: Path, destination: Path) -> dict[str, Any]:
 def _atomic_symlink(target: str, link: Path) -> None:
     temporary = link.with_name(f".{link.name}-{os.getpid()}")
     temporary.unlink(missing_ok=True)
-    temporary.symlink_to(target)
+    temporary.symlink_to(target, target_is_directory=True)
     os.replace(temporary, link)
 
 
@@ -420,6 +427,8 @@ def install_release(
     app_dir: Path,
     updater_dir: Path,
 ) -> None:
+    if (app_dir / ".upgrade-incomplete").exists():
+        raise UpdateError("An active or interrupted upgrade must be recovered first")
     cache_dir = updater_dir / "releases" / release["tag"]
     cache_dir.mkdir(parents=True, exist_ok=True)
     archive = cache_dir / release["asset_name"]
@@ -456,11 +465,21 @@ def install_release(
             "BELL_RELEASE_COMMIT": commit,
             "BELL_RELEASE_DIGEST": release["digest"],
         }
+        receipt = app_dir / ".upgrade-transaction"
+        prior_receipt = receipt.read_text(encoding="utf-8") if receipt.exists() else None
         try:
             result = _run(["/usr/bin/bash", str(installer)], env=environment)
             _log("installer_complete", output=_safe_message(result.stdout, 2000))
             _wait_healthy()
         except UpdateError as update_error:
+            new_receipt = receipt.read_text(encoding="utf-8") if receipt.exists() else None
+            if new_receipt and new_receipt != prior_receipt:
+                transaction = Path(new_receipt.strip()).resolve()
+                if not transaction.is_relative_to(updater_dir.resolve() / "transactions"):
+                    raise UpdateError("Untrusted upgrade recovery location; service must remain stopped") from update_error
+                _run(["/usr/bin/python3", str(transaction / "upgrade_transaction.py"), "recover",
+                      "--app-dir", str(app_dir), "--transaction", str(transaction), "--rollback-committed"], timeout=900)
+                raise UpdateError(f"Update failed; data and code recovery completed: {update_error}") from update_error
             switched = current_link.is_symlink() and os.readlink(current_link) != previous_target
             for path, content in previous_files.items():
                 if content is None:
