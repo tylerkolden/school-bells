@@ -62,6 +62,19 @@ def write_json(path: Path, value: dict) -> None:
                 os.close(descriptor)
 
 
+def flush_tree(root: Path) -> None:
+    for item in [*root.rglob("*"), root, root.parent]:
+        if item.is_file():
+            with item.open("rb" if os.name == "posix" else "ab") as handle:
+                os.fsync(handle.fileno())
+        elif os.name == "posix":
+            descriptor = os.open(item, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+
 def checkpoint(app: Path, destination: Path) -> None:
     selected = roots(app)
     if destination.exists():
@@ -121,16 +134,7 @@ def checkpoint(app: Path, destination: Path) -> None:
     for name in ("config", "sounds"):
         if before[name] != copied[name]:
             raise PreservationError("Copied configuration or uploads failed checksum verification")
-    for item in destination.rglob("*"):
-        if item.is_file():
-            with item.open("rb" if os.name == "posix" else "ab") as handle:
-                os.fsync(handle.fileno())
-        elif os.name == "posix":
-            descriptor = os.open(item, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+    flush_tree(destination)
     write_json(destination / "checkpoint.json", {"schema": 1, "roots": {k: str(v) for k, v in selected.items()}, "files": copied, "metadata": metadata})
 
 
@@ -220,6 +224,7 @@ def rollback(app: Path, destination: Path) -> None:
                 os.chown(path, attributes["uid"], attributes["gid"])
         if inventory(target) != record["files"][name]:
             raise PreservationError("Restored site data failed checksum verification")
+        flush_tree(target)
 
 
 def main() -> int:

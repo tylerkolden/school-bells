@@ -384,6 +384,12 @@ def _atomic_symlink(target: str, link: Path) -> None:
     temporary.unlink(missing_ok=True)
     temporary.symlink_to(target, target_is_directory=True)
     os.replace(temporary, link)
+    if os.name == "posix":
+        descriptor = os.open(link.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def _run(command: list[str], *, timeout: float = 600.0, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:

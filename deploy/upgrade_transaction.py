@@ -25,10 +25,10 @@ PROBE = Path("/run/bell-upgrade-probe")
 SERVICE = "bell-system.service"
 
 
-def durable_text(path: Path, text: str) -> None:
+def durable_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        handle.write(text)
+    with path.open("wb") as handle:
+        handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
     if os.name == "posix":
@@ -38,6 +38,10 @@ def durable_text(path: Path, text: str) -> None:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
+
+
+def durable_text(path: Path, text: str) -> None:
+    durable_bytes(path, text.encode("utf-8"))
 
 
 def marker(app: Path) -> Path:
@@ -59,6 +63,8 @@ def begin(app: Path, transaction: Path, python: Path, helper: Path) -> None:
     # Retain trusted recovery tooling independently of staging cleanup or the selected release.
     for source in (Path(__file__), Path(__file__).with_name("ota_updater.py"), helper):
         shutil.copy2(source, transaction / source.name)
+        with (transaction / source.name).open("rb" if os.name == "posix" else "ab") as handle:
+            os.fsync(handle.fileno())
     record = {"schema": 1, "phase": "preparing", "app": str(app), "previous": os.readlink(current),
               "files": {str(path): {"content": base64.b64encode(path.read_bytes()).decode(),
                                     "mode": path.stat().st_mode & 0o777} if path.is_file() else None
@@ -127,7 +133,7 @@ def recover(app: Path, transaction: Path, *, rollback_committed: bool = False) -
         if previous is None:
             path.unlink(missing_ok=True)
         else:
-            path.write_bytes(base64.b64decode(previous["content"]))
+            durable_bytes(path, base64.b64decode(previous["content"]))
             path.chmod(previous["mode"])
     _atomic_symlink(record["previous"], app / "current")
     allow_probe()
