@@ -139,6 +139,8 @@ def load_frames(
 ) -> Iterator[bytes]:
     with raw.open("rb") as handle:
         while chunk := handle.read(frame_bytes):
+            if len(chunk) < frame_bytes and padding_byte is None:
+                break
             if padding_byte is not None:
                 chunk = chunk.ljust(frame_bytes, bytes([padding_byte]))
             yield chunk
