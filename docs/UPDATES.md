@@ -96,9 +96,11 @@ Do not manually create or upload the release; the appliance requires the Actions
 
 The updater refuses to begin unless the current appliance is Ready, while a page is active, or within
 15 minutes of the next scheduled event. It stages a new version under `/opt/bell/releases`, preflights that exact environment, switches
-`/opt/bell/current` atomically, restarts, and waits for `/ready`. A failed readiness check restores
-the previous release and service unit automatically. Configuration/state backups remain under
-`/var/backups/bell-system`.
+`/opt/bell/current` atomically, restarts, and waits for `/ready`. A failed activation restores the previous release, managed service files and verified site-data
+checkpoint together. From v0.9.0, complete deployment checkpoints remain root-only under
+`/var/lib/bell-updater/transactions`; older deployment backups may remain under
+`/var/backups/bell-system`. See [site-data preservation and interrupted-upgrade recovery](SITE_DATA_PRESERVATION.md)
+for supported storage layouts, crash guards and off-device backup requirements.
 
 The update is intentionally administrator-initiated, never unattended. Surprise restarts and
 unreviewed supply-chain changes are unacceptable for a school paging system.
