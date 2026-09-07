@@ -118,6 +118,38 @@ carried on removable media and verify it locally before installation.
 
 ## Diagnostics
 
+### User-switch repair on Raspberry Pi OS
+
+If an update fails with `runuser: cannot set user id: Operation not permitted`,
+check the updater journal before retrying. A site running ARM64 Raspberry Pi OS with
+systemd 257.13 reproduced the failure when `NoNewPrivileges=yes` was combined with
+seccomp-producing restrictions. Explicit `CAP_SETUID CAP_SETGID` ambient capabilities
+made the same identity-switch probe pass while retaining those restrictions. This is
+an observed compatibility interaction, not a confirmed diagnosis of an upstream kernel bug.
+
+The updater unit now carries those two capabilities across exec; switching to the
+unprivileged account drops them. CI exercises the real systemd sandbox on x86-64 and
+ARM64, verifies the resulting UID/GID and empty effective/ambient capability sets,
+and checks an unprivileged staging write. Installer identity checks happen before
+existing site paths are changed.
+
+An old installed updater needs this small persistent override before it can install
+the corrected release. As an administrator, run:
+
+```bash
+sudo install -d -m 0755 /etc/systemd/system/bell-update.service.d
+printf '[Service]\nAmbientCapabilities=CAP_SETUID CAP_SETGID\n' | sudo tee /etc/systemd/system/bell-update.service.d/20-identity-switch.conf >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl reset-failed bell-update.service
+sudo systemctl show bell-update.service --no-pager -p AmbientCapabilities -p NoNewPrivileges
+```
+
+This does not restart the bell scheduler or initiate an update. Keep the override
+through the upgrade (it is harmless with the corrected unit), then use the normal
+web update flow during the required quiet window. Do not disable `NoNewPrivileges`
+or remove syscall restrictions. Confirm the installed version and Ready status after
+reconnecting; a successful identity probe alone is not proof of a successful upgrade.
+
 ```bash
 systemctl status bell-update.path bell-update.service
 journalctl -u bell-update.service --since today

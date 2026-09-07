@@ -64,6 +64,11 @@ cleanup() {
 trap cleanup EXIT
 
 id bell >/dev/null 2>&1 || useradd --system --create-home --home-dir "$APP_DIR" --shell /usr/sbin/nologin bell
+# Fail before changing existing site paths if the running updater cannot drop privileges.
+if ! runuser -u bell -- /usr/bin/true; then
+  echo "Updater cannot switch to bell. See docs/UPDATES.md: user-switch repair." >&2
+  exit 1
+fi
 install -d -m 0755 -o root -g root "$APP_DIR" "$SHARED_DIR" "$RELEASES_DIR"
 install -d -m 0700 -o root -g root "$BACKUP_DIR" "$UPDATER_DIR"
 install -d -m 0755 -o root -g root "$UPDATER_LIB"
