@@ -75,7 +75,7 @@ from bell.recovery import (
     create_support_bundle,
     restore_portable_backup,
 )
-from bell.safety import check_kill_switch, evaluate_fire, within_allowed_hours
+from bell.safety import MAINTENANCE_MARKER, check_kill_switch, evaluate_fire, within_allowed_hours
 from bell.scheduler import BellScheduler, PlannedEvent, resolve_day, upcoming_events
 from bell.update import UpdateRequestError, load_update_status, queue_update_request
 
@@ -194,6 +194,9 @@ def create_app(
     async def security_headers(request: Request, call_next):
         started = time.monotonic()
         request_id = secrets.token_hex(8)
+        if MAINTENANCE_MARKER.exists() and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            return JSONResponse({"detail": "Upgrade maintenance: edits and transmissions are temporarily blocked"},
+                                status_code=503, headers={"Retry-After": "30"})
         restricted = request.url.path.startswith(("/setup", "/updates", "/recovery", "/account"))
         if (
             restricted
@@ -367,6 +370,8 @@ def create_app(
             blocked_reasons.append("kill switch enabled")
         if pause_active:
             blocked_reasons.append(f"paused: {current.safety.pause_reason}")
+        if MAINTENANCE_MARKER.exists():
+            blocked_reasons.append("Upgrade maintenance: transmissions and edits are blocked")
         if not health.get("ready", False):
             blocked_reasons.extend(str(item) for item in health.get("readiness_reasons", []))
         return {
@@ -2772,6 +2777,8 @@ def create_app(
                 refreshed = config()
                 if not secrets.compare_digest(config_hash, refreshed.hash):
                     raise HTTPException(409, "Configuration changed. Reload and try again.")
+                if health_provider and health_provider().get("active_page"):
+                    raise HTTPException(409, "Wait for active audio to stop before restoring")
                 restore_portable_backup(
                     source,
                     directory.parent,

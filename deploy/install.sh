@@ -49,6 +49,14 @@ if [[ -e "$release_dir" ]]; then
 fi
 stage="$RELEASES_DIR/.staging-${release_id}-$$"
 cleanup() {
+  local result=$?
+  trap - EXIT
+  if [[ "$result" -ne 0 && -n "${transaction:-}" && -f "$transaction/transaction.json" ]]; then
+    if ! python3 "$transaction/upgrade_transaction.py" recover --app-dir "$APP_DIR" --transaction "$transaction"; then
+      echo "Rollback incomplete. Service remains guarded; retain $transaction for recovery." >&2
+      exit 1
+    fi
+  fi
   if [[ -n "${stage:-}" && -d "$stage" ]]; then
     rm -rf -- "$stage"
   fi
@@ -60,9 +68,22 @@ install -d -m 0755 -o root -g root "$APP_DIR" "$SHARED_DIR" "$RELEASES_DIR"
 install -d -m 0700 -o root -g root "$BACKUP_DIR" "$UPDATER_DIR"
 install -d -m 0755 -o root -g root "$UPDATER_LIB"
 fresh_config=0
+exec 9>"$UPDATER_DIR/install.lock"
+flock -n 9 || { echo "Another installer is active" >&2; exit 1; }
+if [[ -e "$APP_DIR/.upgrade-incomplete" ]]; then
+  echo "Interrupted upgrade: recover the checkpoint named in $APP_DIR/.upgrade-incomplete first" >&2
+  exit 1
+fi
+if [[ -d "$APP_DIR/config" && ! -L "$APP_DIR/current" ]]; then
+  echo "Legacy installation needs a reviewed migration with a rollback release; no site data changed" >&2
+  exit 1
+fi
+transaction=""
 
 # Preserve a consistent copy of site-owned data before changing layout or code.
-PYTHONPATH="$SOURCE_DIR" python3 -m bell.backup --app-dir "$APP_DIR" --backup-dir "$BACKUP_DIR"
+if [[ ! -L "$APP_DIR/current" ]]; then
+  PYTHONPATH="$SOURCE_DIR" python3 -m bell.backup --app-dir "$APP_DIR" --backup-dir "$BACKUP_DIR"
+fi
 
 migrate_shared_directory() {
   local name="$1"
@@ -196,11 +217,21 @@ printf '{"schema":1,"tag":"%s","version":"%s","commit":"%s","digest":"%s","insta
 chown -R root:root "$stage"
 chown -R bell:bell "$stage/.venv"
 
+# Stop writers and checkpoint the existing installation after dependencies are staged.
+if [[ -L "$APP_DIR/current" ]]; then
+  transaction="$UPDATER_DIR/transactions/${release_id}-$$"
+  python3 "$SOURCE_DIR/deploy/upgrade_transaction.py" begin --app-dir "$APP_DIR" \
+    --transaction "$transaction" --python "$stage/.venv/bin/python" --helper "$stage/bell/upgrade.py"
+fi
+
 # Validate the exact staged code, dependencies, configuration, interface, codecs, and sounds.
 cd "$stage"
 runuser -u bell -- "$stage/.venv/bin/python" -m bell.service \
   --check-only --config-dir "$APP_DIR/config" --env-file "$APP_DIR/config/bell.env"
 
+if [[ -n "$transaction" ]]; then
+  python3 "$transaction/upgrade.py" verify --app-dir "$APP_DIR" --checkpoint "$transaction/data"
+fi
 mv -- "$stage" "$release_dir"
 stage=""
 install -m 0755 -o root -g root "$release_dir/deploy/ota_updater.py" "$UPDATER_LIB/ota_updater.py"
@@ -214,7 +245,11 @@ mv -Tf -- "$new_link" "$APP_DIR/current"
 
 systemctl daemon-reload
 systemctl enable bell-system.service bell-update.path
-systemctl restart bell-system.service
+if [[ -n "$transaction" ]]; then
+  python3 "$transaction/upgrade_transaction.py" finish --app-dir "$APP_DIR" --transaction "$transaction"
+else
+  systemctl restart bell-system.service
+fi
 systemctl start bell-update.path
 systemctl --quiet is-active bell-system.service
 systemctl --quiet is-active bell-update.path

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import platform
 import re
 import shutil
@@ -11,11 +13,13 @@ import tempfile
 import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from ruamel.yaml import YAML
+
 from bell import __version__
-from bell.config import BellConfig, load_config
+from bell.config import BellConfig, ConfigLoadError, load_config
 
 CONFIG_FILES = {
     "calendar.yaml",
@@ -36,14 +40,12 @@ class RecoveryError(RuntimeError):
 def _regular_files(directory: Path) -> list[Path]:
     if not directory.is_dir():
         return []
-    files: list[Path] = []
-    for item in sorted(directory.iterdir()):
-        if item.is_symlink():
-            raise RecoveryError(f"Refusing symbolic link in backup source: {item}")
+    files = []
+    for item in sorted(directory.rglob("*")):
+        if item.is_symlink() or not (item.is_file() or item.is_dir()):
+            raise RecoveryError(f"Refusing link or special file in backup source: {item}")
         if item.is_file():
             files.append(item)
-        elif item.is_dir():
-            raise RecoveryError(f"Unexpected nested directory in backup source: {item}")
     return files
 
 
@@ -53,68 +55,106 @@ def _prune(directory: Path, pattern: str, keep: int = 10) -> None:
         item.unlink(missing_ok=True)
 
 
-def create_portable_backup(
-    config: BellConfig,
-    output_dir: Path,
-    *,
-    now: datetime | None = None,
-) -> Path:
+def _hashes(directory: Path) -> dict[str, str]:
+    result = {}
+    for path in _regular_files(directory):
+        if path.relative_to(directory).as_posix() == "manifest.json":
+            continue
+        with path.open("rb") as handle:
+            result[path.relative_to(directory).as_posix()] = hashlib.file_digest(handle, "sha256").hexdigest()
+    return result
+
+
+def create_portable_backup(config: BellConfig, output_dir: Path, *, now: datetime | None = None) -> Path:
     current = now or datetime.now(UTC)
     output_dir.mkdir(parents=True, exist_ok=True)
     archive = output_dir / f"school-bell-backup-{current:%Y%m%dT%H%M%S%fZ}.tar.gz"
-    with tempfile.TemporaryDirectory(prefix="bell-portable-") as temporary:
-        stage = Path(temporary)
-        config_stage = stage / "config"
-        sounds_stage = stage / "sounds"
-        config_stage.mkdir()
-        sounds_stage.mkdir()
-        for name in sorted(CONFIG_FILES):
-            shutil.copy2(config.config_dir / name, config_stage / name)
-        for sound in _regular_files(config.sounds_path):
-            if sound.suffix.lower() == ".wav":
-                shutil.copy2(sound, sounds_stage / sound.name)
-        if config.logo_path and config.logo_path.is_file():
-            logo = stage / "state" / "branding" / "logo.png"
-            logo.parent.mkdir(parents=True)
-            shutil.copy2(config.logo_path, logo)
-        manifest = {
-            "schema": 1,
-            "product": "bell-system",
-            "version": __version__,
-            "created_at": current.isoformat(),
-            "school_name": config.settings.school_name,
-            "config_hash": config.hash,
-            "includes_credentials": False,
-        }
-        (stage / "manifest.json").write_text(
-            json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-        )
-        with tarfile.open(archive, "w:gz") as output:
-            for name in ("manifest.json", "config", "sounds", "state"):
-                path = stage / name
-                if path.exists():
-                    output.add(path, arcname=name, recursive=True)
-    archive.chmod(0o600)
+    partial = archive.with_suffix(".partial")
+    try:
+        with tempfile.TemporaryDirectory(prefix="bell-portable-") as temporary:
+            stage = Path(temporary) / "contents"
+            (stage / "config").mkdir(parents=True)
+            (stage / "sounds").mkdir()
+            for name in sorted(CONFIG_FILES):
+                source = config.config_dir / name
+                if source.is_symlink():
+                    raise RecoveryError("Configuration links cannot be exported")
+                shutil.copy2(source, stage / "config" / name)
+            ca_paths = {}
+            for destination in config.destinations:
+                if destination.tls_ca_file:
+                    try:
+                        relative = destination.tls_ca_file.relative_to(config.config_dir)
+                    except ValueError as exc:
+                        raise RecoveryError("External TLS CA files require a deployment checkpoint, not portable recovery") from exc
+                    if relative.suffix.lower() not in {".pem", ".crt", ".cer"} or destination.tls_ca_file.is_symlink():
+                        raise RecoveryError("Portable TLS CA must be a regular PEM/CRT/CER file inside config")
+                    target = stage / "config" / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(destination.tls_ca_file, target)
+                    ca_paths[destination.name] = relative.as_posix()
+            if ca_paths:
+                yaml = YAML()
+                yaml.preserve_quotes = True
+                path = stage / "config/destinations.yaml"
+                document = yaml.load(path.read_text(encoding="utf-8"))
+                for entry in document.get("destinations", []):
+                    if entry["name"] in ca_paths:
+                        entry["tls_ca_file"] = ca_paths[entry["name"]]
+                with path.open("w", encoding="utf-8") as handle:
+                    yaml.dump(document, handle)
+            for sound in _regular_files(config.sounds_path):
+                target = stage / "sounds" / sound.relative_to(config.sounds_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(sound, target)
+            if config.logo_path and config.logo_path.is_file():
+                if config.logo_path.is_symlink():
+                    raise RecoveryError("Branding links cannot be exported")
+                logo = stage / "state/branding/logo.png"
+                logo.parent.mkdir(parents=True)
+                shutil.copy2(config.logo_path, logo)
+            manifest = {"schema": 2, "product": "bell-system", "version": __version__,
+                        "created_at": current.isoformat(), "school_name": config.settings.school_name,
+                        "config_hash": config.hash, "excludes_authentication_store": True,
+                        "sound_scope": "all_regular_files", "files": _hashes(stage)}
+            (stage / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+            with tarfile.open(partial, "w:gz") as output:
+                for name in ("manifest.json", "config", "sounds", "state"):
+                    if (stage / name).exists():
+                        output.add(stage / name, arcname=name)
+            # Do not publish or prune an archive that this version cannot restore.
+            extract_and_validate_backup(partial, Path(temporary) / "verified")
+            partial.chmod(0o600)
+            partial.replace(archive)
+    finally:
+        partial.unlink(missing_ok=True)
     _prune(output_dir, "school-bell-backup-*.tar.gz")
     return archive
 
 
-def _allowed_member(name: str) -> bool:
+def _allowed_member(name: str, *, directory: bool = False) -> bool:
     path = PurePosixPath(name)
-    if path.is_absolute() or ".." in path.parts or not path.parts:
+    if (not name or "\\" in name or ":" in name or path.is_absolute()
+            or any(part in {"", ".", ".."} for part in name.split("/"))
+            or PureWindowsPath(name).drive
+            or any(PureWindowsPath(part).is_reserved() or part.endswith((".", " "))
+                   or any(char in part for char in '<>"|?*') for part in path.parts)):
+
         return False
     if name == "manifest.json" or name in {"config", "sounds", "state", "state/branding"}:
         return True
-    if len(path.parts) == 2 and path.parts[0] == "config":
-        return path.parts[1] in CONFIG_FILES
-    if len(path.parts) == 2 and path.parts[0] == "sounds":
-        return path.suffix.lower() == ".wav"
-    return name == "state/branding/logo.png"
+    if path.parts[0] == "config":
+        if "bell.env" in path.parts:
+            return False
+        return directory or name in {f"config/{item}" for item in CONFIG_FILES} or path.suffix.lower() in {".pem", ".crt", ".cer"}
+    return path.parts[0] == "sounds" or name == "state/branding/logo.png"
 
 
 def extract_and_validate_backup(archive: Path, destination: Path) -> BellConfig:
     if not archive.is_file() or archive.stat().st_size > MAX_ARCHIVE_BYTES:
         raise RecoveryError("Backup is missing or exceeds the 50 MiB archive limit")
+    if destination.exists() and (destination.is_symlink() or any(destination.iterdir())):
+        raise RecoveryError("Backup extraction requires an empty, non-symlink directory")
     destination.mkdir(parents=True, exist_ok=True)
     try:
         with tarfile.open(archive, "r:gz") as source:
@@ -124,114 +164,119 @@ def extract_and_validate_backup(archive: Path, destination: Path) -> BellConfig:
             expanded = 0
             seen: set[str] = set()
             for member in members:
-                if not _allowed_member(member.name):
+                if not _allowed_member(member.name, directory=member.isdir()):
                     raise RecoveryError(f"Backup contains an unexpected path: {member.name}")
-                if member.name in seen:
-                    raise RecoveryError(f"Backup contains a duplicate path: {member.name}")
-                seen.add(member.name)
-                if member.issym() or member.islnk() or member.isdev():
-                    raise RecoveryError("Backup links and device files are not allowed")
+                canonical = member.name.casefold()
+                if canonical in seen:
+                    raise RecoveryError(f"Backup contains a duplicate or case-colliding path: {member.name}")
+                seen.add(canonical)
+                if not (member.isfile() or member.isdir()):
+                    raise RecoveryError("Backup links and special files are not allowed")
                 expanded += member.size
                 if expanded > MAX_EXPANDED_BYTES:
                     raise RecoveryError("Expanded backup exceeds the 150 MiB safety limit")
+            for member in members:
                 target = destination.joinpath(*PurePosixPath(member.name).parts)
                 if member.isdir():
                     target.mkdir(parents=True, exist_ok=True)
-                    continue
-                if not member.isfile():
-                    raise RecoveryError(f"Unsupported backup member: {member.name}")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                extracted = source.extractfile(member)
-                if extracted is None:
-                    raise RecoveryError(f"Backup member is unreadable: {member.name}")
-                with target.open("wb") as output:
-                    shutil.copyfileobj(extracted, output, length=1024 * 1024)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    extracted = source.extractfile(member)
+                    if extracted is None:
+                        raise RecoveryError("Backup member is unreadable")
+                    with extracted, target.open("xb") as output:
+                        shutil.copyfileobj(extracted, output, length=1024 * 1024)
     except (OSError, tarfile.TarError) as exc:
         raise RecoveryError(f"Backup archive is unreadable: {exc}") from exc
-    manifest_path = destination / "manifest.json"
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RecoveryError("Backup manifest is missing or invalid") from exc
-    if (
-        not isinstance(manifest, dict)
-        or manifest.get("schema") != 1
-        or manifest.get("product") != "bell-system"
-    ):
-        raise RecoveryError("Backup manifest is not compatible with this appliance")
-    missing = sorted(CONFIG_FILES - {path.name for path in (destination / "config").glob("*.yaml")})
-    if missing:
-        raise RecoveryError("Backup is missing configuration files: " + ", ".join(missing))
-    try:
-        return load_config(destination / "config")
-    except Exception as exc:
-        raise RecoveryError(f"Backup configuration did not validate: {exc}") from exc
+        manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict) or manifest.get("schema") not in {1, 2} or manifest.get("product") != "bell-system":
+            raise RecoveryError("Backup manifest is not compatible with this appliance")
+        if manifest["schema"] == 2 and (manifest.get("sound_scope") != "all_regular_files" or manifest.get("files") != _hashes(destination)):
+            raise RecoveryError("Backup file inventory or checksum does not match")
+        if manifest["schema"] == 1 and any(path.suffix.lower() != ".wav" for path in _regular_files(destination / "sounds")):
+            raise RecoveryError("Legacy backup may contain only WAV audio")
+        return load_config(destination / "config", portable=True)
+    except (OSError, UnicodeDecodeError, ValueError, ConfigLoadError) as exc:
+        raise RecoveryError(f"Backup configuration or manifest did not validate: {exc}") from exc
 
 
-def _replace_library(source: Path, target: Path, suffix: str) -> None:
+def _replace_library(source: Path, target: Path, *, legacy: bool = False) -> None:
     target.mkdir(parents=True, exist_ok=True)
-    desired = {item.name for item in source.iterdir() if item.is_file() and item.suffix == suffix}
-    for existing in target.iterdir():
-        if existing.is_file() and existing.suffix == suffix and existing.name not in desired:
+    incoming = {item.relative_to(source) for item in _regular_files(source)}
+    for existing in _regular_files(target):
+        if existing.relative_to(target) not in incoming and (not legacy or existing.suffix.lower() == ".wav"):
             existing.unlink()
-    for item in source.iterdir():
-        if item.is_file() and item.suffix == suffix:
-            temporary = target / f".{item.name}.restore"
-            shutil.copy2(item, temporary)
-            temporary.replace(target / item.name)
+    for relative in incoming:
+        output = target / relative
+        output.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix=".restore-", dir=output.parent)
+        os.close(descriptor)
+        temporary = Path(name)
+        try:
+            shutil.copy2(source / relative, temporary)
+            temporary.replace(output)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
-def restore_portable_backup(
-    archive: Path,
-    app_dir: Path,
-    backup_dir: Path,
-    *,
-    reload_callback: Callable[[], None] | None = None,
-) -> Path:
+def restore_portable_backup(archive: Path, app_dir: Path, backup_dir: Path, *,
+                            reload_callback: Callable[[], None] | None = None) -> Path:
     current = load_config(app_dir / "config")
-    pre_restore = create_portable_backup(current, backup_dir)
-    with (
-        tempfile.TemporaryDirectory(prefix="bell-restore-") as extracted_temp,
-        tempfile.TemporaryDirectory(prefix="bell-rollback-") as rollback_temp,
-    ):
-        extracted = Path(extracted_temp)
-        rollback = Path(rollback_temp)
+    pending = current.state_path / ".restore-incomplete"
+    if pending.exists():
+        raise RecoveryError("An interrupted restore requires recovery from its recorded pre-restore backup")
+    with tempfile.TemporaryDirectory(prefix="bell-restore-") as extracted_temp, tempfile.TemporaryDirectory(prefix="bell-rollback-") as rollback_temp:
+        extracted, rollback = Path(extracted_temp), Path(rollback_temp)
         extract_and_validate_backup(archive, extracted)
+        legacy = json.loads((extracted / "manifest.json").read_text(encoding="utf-8"))["schema"] == 1
+        # A restore changes site content, never this appliance's storage locations.
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        settings_path = extracted / "config/settings.yaml"
+        document = yaml.load(settings_path.read_text(encoding="utf-8"))
+        for name in ("sounds_dir", "state_dir", "log_dir"):
+            document["settings"][name] = str(getattr(current.settings, name))
+        with settings_path.open("w", encoding="utf-8") as handle:
+            yaml.dump(document, handle)
+        pre_restore = create_portable_backup(current, backup_dir)
+        _regular_files(current.config_dir)
         shutil.copytree(current.config_dir, rollback / "config")
         shutil.copytree(current.sounds_path, rollback / "sounds")
-        if current.logo_path and current.logo_path.is_file():
-            old_logo = rollback / "state" / "branding" / "logo.png"
-            old_logo.parent.mkdir(parents=True)
-            shutil.copy2(current.logo_path, old_logo)
+        branding = current.state_path / "branding"
+        if branding.is_dir():
+            _regular_files(branding)
+            shutil.copytree(branding, rollback / "branding")
+        pending.parent.mkdir(parents=True, exist_ok=True)
+        with pending.open("x", encoding="utf-8") as handle:
+            json.dump({"backup": str(pre_restore), "config": str(current.config_dir),
+                       "sounds": str(current.sounds_path), "state": str(current.state_path)}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
         try:
-            for name in CONFIG_FILES:
-                temporary = current.config_dir / f".{name}.restore"
-                shutil.copy2(extracted / "config" / name, temporary)
-                temporary.replace(current.config_dir / name)
-            _replace_library(extracted / "sounds", current.sounds_path, ".wav")
-            target_branding = current.state_path / "branding"
-            restored_logo = extracted / "state" / "branding" / "logo.png"
-            if restored_logo.is_file():
-                target_branding.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(restored_logo, target_branding / "logo.png")
-            elif target_branding.is_dir():
-                (target_branding / "logo.png").unlink(missing_ok=True)
+            for item in _regular_files(extracted / "config"):
+                relative = item.relative_to(extracted / "config")
+                target = current.config_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+            _replace_library(extracted / "sounds", current.sounds_path, legacy=legacy)
+            branding.mkdir(parents=True, exist_ok=True)
+            logo = extracted / "state/branding/logo.png"
+            if logo.exists():
+                shutil.copy2(logo, branding / "logo.png")
+            else:
+                (branding / "logo.png").unlink(missing_ok=True)
             load_config(current.config_dir)
             if reload_callback:
                 reload_callback()
+            pending.unlink()
         except Exception as exc:
-            for name in CONFIG_FILES:
-                shutil.copy2(rollback / "config" / name, current.config_dir / name)
-            _replace_library(rollback / "sounds", current.sounds_path, ".wav")
-            old_logo = rollback / "state" / "branding" / "logo.png"
-            branding = current.state_path / "branding"
-            if old_logo.is_file():
-                branding.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(old_logo, branding / "logo.png")
-            elif branding.is_dir():
-                (branding / "logo.png").unlink(missing_ok=True)
+            _replace_library(rollback / "config", current.config_dir)
+            _replace_library(rollback / "sounds", current.sounds_path)
+            _replace_library(rollback / "branding", branding)
             if reload_callback:
                 reload_callback()
+            pending.unlink()
             raise RecoveryError("Restore failed; the previous configuration was restored") from exc
     return pre_restore
 

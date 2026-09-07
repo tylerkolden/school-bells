@@ -10,6 +10,7 @@ from pathlib import Path
 from bell.config import Safety
 
 LOGGER = logging.getLogger(__name__)
+MAINTENANCE_MARKER = Path("/opt/bell/.upgrade-incomplete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +83,8 @@ def evaluate_fire(
     manual: bool = False,
     override_hours: bool = False,
 ) -> SafetyDecision:
+    if MAINTENANCE_MARKER.exists():
+        return SafetyDecision(False, "upgrade maintenance; transmissions are blocked")
     checks = (
         check_kill_switch(now.date(), safety),
         check_pause(now, safety),

@@ -443,7 +443,7 @@ def _format_validation(prefix: str, exc: ValidationError) -> list[str]:
     return errors
 
 
-def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
+def load_config(config_dir: Path | str = Path("config"), *, portable: bool = False) -> BellConfig:
     directory = Path(config_dir).expanduser().resolve()
     errors: list[str] = []
     required = (
@@ -466,6 +466,10 @@ def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
     if errors:
         raise ConfigLoadError(errors)
     settings_doc = raw["settings.yaml"]
+    if portable:
+        # Validate against extracted files, never paths controlled by an archive.
+        settings_doc = {**settings_doc, "settings": {**settings_doc.get("settings", {}),
+                       "sounds_dir": "sounds", "state_dir": "state", "log_dir": "logs"}}
     payload = {
         "settings": settings_doc.get("settings", {}),
         "safety": settings_doc.get("safety", {}),
@@ -483,6 +487,9 @@ def load_config(config_dir: Path | str = Path("config")) -> BellConfig:
 
     for destination in config.destinations:
         if destination.tls_ca_file:
+            if portable and (destination.tls_ca_file.is_absolute() or ".." in destination.tls_ca_file.parts):
+                errors.append(f"destination {destination.name!r}: external TLS CA cannot be validated in a portable backup")
+                continue
             destination.tls_ca_file = _resolve_path(destination.tls_ca_file, directory)
             if not destination.tls_ca_file.is_file():
                 errors.append(

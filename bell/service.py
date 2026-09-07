@@ -33,6 +33,7 @@ from bell.delivery import DeliveryManager, DeliveryReport, PageDeliveryError
 from bell.logging_setup import configure_logging
 from bell.monitor import EndpointMonitor, EndpointRegistry
 from bell.paging import PageCoordinator
+from bell.safety import MAINTENANCE_MARKER
 from bell.scheduler import BellScheduler
 from bell.systemd import notify, watchdog_interval
 from bell.wire.poly_group_page import PolyGroupPage
@@ -230,6 +231,8 @@ class ServiceRuntime:
         scheduler_running = self.scheduler.scheduler.running
         monitor_running = self.monitor.is_alive
         reasons: list[str] = []
+        if (self.config.state_path / ".restore-incomplete").exists():
+            reasons.append("Restore maintenance requires completion or recovery")
         if unhealthy:
             reasons.append("required endpoint unhealthy")
         if unknown_required:
@@ -477,6 +480,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 1
     configure_logging(config.log_path)
+    if (config.state_path / ".restore-incomplete").exists():
+        LOGGER.error("interrupted_restore_requires_recovery")
+        return 1
     errors = validate_startup(config)
     if errors:
         for error in errors:
@@ -569,6 +575,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if time.monotonic() - last_heartbeat >= heartbeat_seconds:
             notify("WATCHDOG=1")
             last_heartbeat = time.monotonic()
+        if MAINTENANCE_MARKER.exists():
+            continue  # Do not mutate queued alerts while checking the candidate's preserved state.
         runtime.alerts.retry_pending()
         if time.monotonic() - last_health_check >= 15:
             health = runtime.health_data()
