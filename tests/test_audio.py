@@ -58,11 +58,11 @@ def test_final_pcmu_frame_is_padded_with_digital_silence(tmp_path: Path) -> None
     assert frames == [b"a" * 160, b"a" + b"\xff" * 159]
 
 
-def test_stateful_codec_final_frame_is_not_invented(tmp_path: Path) -> None:
+def test_stateful_codec_incomplete_final_frame_is_discarded(tmp_path: Path) -> None:
     raw = tmp_path / "partial.g722"
     raw.write_bytes(b"a" * 161)
     frames = list(audio.load_frames(raw, 160, None))
-    assert frames == [b"a" * 160, b"a"]
+    assert frames == [b"a" * 160]
 
 
 def test_probe_and_prep(tmp_path: Path) -> None:
